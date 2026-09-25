@@ -879,6 +879,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
     as_json = getattr(args, "json", False)
     ticker = args.ticker
     research_file = getattr(args, "research_file", None)
+    use_jev = getattr(args, "jev", False)
+    jev_record: dict = {}
 
     async def _run() -> dict:
         from src.clients.kalshi_client import KalshiClient
@@ -955,6 +957,14 @@ def cmd_verify(args: argparse.Namespace) -> None:
                             raise RuntimeError(f"could not parse/repair LLM JSON: {json_str[:200]!r}")
                         return json.loads(repaired)
 
+            # 3b. Optional Jev floor: an independent calibrated P(YES) from the
+            #     researched facts; can only make the gate stricter.
+            if use_jev:
+                from src.agent.jev import with_jev_floor
+
+                facts = payload.get("facts") if research_file else None
+                llm_call = with_jev_floor(llm_call, question, facts=facts, record=jev_record)
+
             # 4. Run the pure pipeline with the injected IO.
             verdict = await run_verify(candidate, llm_call)
             return {"candidate": candidate, "verdict": verdict}
@@ -964,6 +974,9 @@ def cmd_verify(args: argparse.Namespace) -> None:
     out = asyncio.run(_run())
     candidate = out["candidate"]
     verdict = out["verdict"]
+
+    if jev_record:
+        verdict["jev_true_yes_pct"] = round(jev_record["jev_true_yes_pct"], 1)
 
     if as_json:
         print(json.dumps(verdict, indent=2))
@@ -983,6 +996,8 @@ def cmd_verify(args: argparse.Namespace) -> None:
     print(f"  recommend:  {verdict['recommend']}   (size: {verdict['size_hint']})")
     print(f"  edge:       {verdict['edge_pts']:+d} pts   survives skeptic: {verdict['survives']}")
     print(f"  true-YES:   {verdict['true_yes']:.0f}%   direction: {verdict['direction']}")
+    if jev_record:
+        print(f"  Jev P(YES): {jev_record['jev_true_yes_pct']:.1f}%   (floor on true-YES; ~typesafe/jev-latest)")
     print()
     print(f"  {verdict['note']}")
     print("=" * 70)
@@ -1781,6 +1796,15 @@ def build_parser() -> argparse.ArgumentParser:
             "by a human or agent. Runs the gate with no LLM API key; the edge is "
             "still recomputed off the live book. Strictly validated — a half-"
             "filled file fails, it never silently passes."
+        ),
+    )
+    p_verify.add_argument(
+        "--jev",
+        action="store_true",
+        help=(
+            "Floor the skeptic's true-YES at an independent calibrated P(YES) from "
+            "TypeSafe Jev (~typesafe/jev-latest, OpenRouter Decisions API) given the "
+            "researched facts (optional 'facts' list in the research file). Stricter only."
         ),
     )
     p_verify.set_defaults(func=cmd_verify)
