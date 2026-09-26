@@ -220,3 +220,7 @@ secrets.yaml
 *.pem
 *.key
 .env*
+
+# any private-key variant (kalshi_private_key.txt, _prod, ...)
+kalshi_private_key*
+*private_key*
