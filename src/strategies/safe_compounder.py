@@ -225,6 +225,15 @@ def market_confidence_score(ticker: str, orderbook: dict, market: dict) -> Tuple
 # SafeCompounder class
 # -----------------------------------------------------------------------
 
+def _to_int_count(v) -> int:
+    """Coerce a Kalshi count field to int. The v2 API returns these as strings
+    ('0.00', '16.00'); comparing a str to an int raises TypeError."""
+    try:
+        return int(float(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 class SafeCompounder:
     """
     Edge-based NO-side strategy integrated with repo's KalshiClient.
@@ -281,9 +290,11 @@ class SafeCompounder:
         print(f"\n💰 Cash: ${cash/100:.2f} | Portfolio: ${portfolio/100:.2f} | "
               f"Total: ${(cash+portfolio)/100:.2f}\n", flush=True)
 
-        # Step 0: Cancel legacy YES orders
-        print("🧹 Step 0: Cancel legacy YES orders...", flush=True)
-        cancelled = await self._cancel_yes_orders()
+        # (Removed 2026-09-26) The legacy "cancel YES orders" step ran even in dry
+        # mode and its deprecated `side` filter matched other strategies' NO
+        # orders; with a working v2 cancel it would wipe the whole account's
+        # resting book. This strategy must never cancel orders it didn't place.
+        cancelled = 0
 
         # Step 1: Fetch all markets
         print("\n📡 Step 1: Fetching all active markets...", flush=True)
@@ -603,7 +614,8 @@ class SafeCompounder:
             positions_resp = await self.client.get_positions()
             positions = positions_resp.get("market_positions", [])
             pos_tickers = {
-                p["ticker"] for p in positions if abs(p.get("position", 0)) > 0
+                p["ticker"] for p in positions
+                if abs(float(p.get("position_fp", 0) or 0)) > 0  # Kalshi uses position_fp, not position
             }
         except Exception:
             pos_tickers = set()
@@ -680,11 +692,12 @@ class SafeCompounder:
                     side="no",
                     action="buy",
                     count=contracts,
+                    type_="limit",  # resting maker order at ask-1c (was defaulting to market/IOC -> never filled)
                     no_price=price_cents,
                 )
                 order = r.get("order", {})
-                status = order.get("status", "?")
-                filled = order.get("fill_count", 0)
+                status = order.get("status", "resting")
+                filled = _to_int_count(order.get("fill_count", 0))
 
                 if filled > 0:
                     stats["filled"] += filled
@@ -733,40 +746,6 @@ class SafeCompounder:
         contracts = max(1, position_value // price_cents)
         contracts = min(contracts, 200)
         return contracts
-
-    async def _cancel_yes_orders(self) -> int:
-        """Cancel any resting YES-side orders (legacy)."""
-        try:
-            orders_resp = await self.client.get_orders(status="resting")
-            orders = orders_resp.get("orders", [])
-            yes_orders = [o for o in orders if o.get("side") == "yes"]
-            cancelled = 0
-            for o in yes_orders:
-                try:
-                    await self.client.cancel_order(o["order_id"])
-                    yes_price = o.get('yes_price', 0)
-                    if isinstance(yes_price, (int, float)) and yes_price > 0:
-                        # Convert cents to dollars if needed for display
-                        if yes_price > 1.0:
-                            price_display = f"${yes_price/100:.2f}"
-                        else:
-                            price_display = f"${yes_price:.2f}"
-                    else:
-                        price_display = "?"
-                    print(
-                        f"  🗑️ Cancelled YES: {o['ticker']} @ {price_display}",
-                        flush=True,
-                    )
-                    cancelled += 1
-                    await asyncio.sleep(0.15)
-                except Exception as e:
-                    logger.warning("Cancel failed %s: %s", o["ticker"], e)
-            if not yes_orders:
-                print("  No legacy YES orders.", flush=True)
-            return cancelled
-        except Exception as e:
-            logger.error("Error cancelling YES orders: %s", e)
-            return 0
 
     async def check_fills(self) -> None:
         """Check recent fills and resting orders."""

@@ -5,6 +5,69 @@ All notable changes to the Kalshi AI Trading Bot project will be documented in t
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **TypeSafe Jev support** (`~typesafe/jev-latest`, OpenRouter Decisions API) — measured, not
+  hyped: see **[docs/JEV.md](docs/JEV.md)**. `cli verify --jev` floors the skeptic's
+  true-YES at Jev's independent P(YES) (stricter-only); `src/agent/jev.py` +
+  `scripts/jev_classify.py` batch-classify text against a market rule (~50k pairs/min,
+  206/207 on endorsement posts); `scripts/jev_backtest.py` reproduces the blind test
+  where Jev lost to the book (Brier 0.209 vs 0.157, n=601).
+- **`cli report` shows all-time drawdown** after a governor peak re-baseline (read from
+  `data/runtime/governor_audit.jsonl`), so a reset never hides a drawdown publicly.
+
+### Fixed
+- **`KalshiClient.cancel_order`** used the deprecated v1 path (HTTP 410); it now calls
+  `DELETE /trade-api/v2/portfolio/events/orders/{id}`.
+
+### Added (earlier this cycle)
+- **`cli verify --research-file`** — run the adversarial-verify gate with **no LLM
+  API key**: supply the research + skeptic judgments as JSON (a human or agent does
+  them out-of-band), and the deterministic gate still recomputes the edge off the
+  live orderbook, so the fade can't be fudged by optimistic pricing.
+- **`cli report`** — renders a public **[Live Track Record](docs/TRACK_RECORD.md)**
+  from the persisted settlements / journal / policy, losses included. The account
+  section is explicitly framed as *blended* (operator manual trades + autonomous
+  strategy) so a manual-driven drawdown is never misread as the strategy failing;
+  the strategy's real edge lives in the journal-based metrics. Offline-capable.
+- **`cli fills`** — reconciles the decision journal against actual order fills:
+  voids records whose maker orders were cancelled unfilled and shrinks partial
+  fills, so calibration and the Edge Policy only ever learn from trades that
+  actually executed (no phantom predictions).
+- **`scripts/capture_corpus.py`** — captures a daily price snapshot of the full
+  open-market universe to `data/corpus/` (idempotent per UTC day). Joined against
+  settlements, this is the entry-price corpus a real out-of-sample backtest needs.
+- **Non-sports longshot bucket** in `scripts/hunt_candidates.py` — surfaces the
+  pond where researched fades actually pay (liquid sports books are already sharp).
+- **The self-improvement loop is closed.** A new data-driven **Edge Policy**
+  (`src/agent/policy.py`) turns your settled track record into a pre-trade gate:
+  it **blocks** category/method groups your record proves lose money (≥5 settled
+  trades, negative realized P&L), **warns** on a net-negative side (advisory — a
+  losing side never disables the whole strategy), and **haircuts** `est_prob`
+  bands where you're ≥10pp overconfident. Honest gating throughout: a group with
+  fewer than 5 settled trades earns no rule.
+- **`cli policy`** — read-only view of the gate your settled record earns
+  (`--demo` runs on a shipped fixture, no keys needed; `--json` for machines).
+- **`cli improve`** — the loop end to end: settle → reconcile → re-derive the
+  policy → diff what the newest settlements changed → persist the active gate.
+  `--dry` previews; falls back to the local settlements log when offline.
+- **Edge Policy gate in `place_guarded_order`.** A blocked category/method is a
+  hard refusal (`blocked_by_policy`); the agent keeps full authority via
+  `cli trade --override-policy` (the override is recorded). Backward-compatible:
+  no policy file means no opinion, so nothing changes until you run `improve`.
+- **MCP `policy` tool** — the gate is now drivable from Claude Desktop/Code
+  (read-only, derives fresh in memory).
+- `settle.settlement_to_record` / `series_category` — adapt Kalshi's
+  authoritative settlements into journal-shaped records so the policy learns
+  from real outcomes, with the Kalshi series prefix as the category.
+
+### Changed
+- `cli backtest` no longer claims a fake "coming soon" engine. It honestly
+  explains that a strategy backtest needs a captured price/outcome corpus this
+  repo doesn't ship yet, and points to the feedback loop (`edge`/`policy`/
+  `improve`) that works today without one.
+
 ## [2.0.1] - 2026-06-12
 
 ### Fixed

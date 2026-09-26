@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -145,6 +146,876 @@ def _run_safe_compounder(
             asyncio.run(_run_once())
     except KeyboardInterrupt:
         print("\nSafe Compounder stopped by user.")
+
+
+def cmd_daily(args: argparse.Namespace) -> None:
+    """Bounded once-through daily run: kill switch -> governed trade -> snapshot.
+
+    Unlike ``run`` (an infinite loop), ``daily`` executes a single cycle and
+    exits — the right shape for a cron/launchd schedule. The risk governor runs
+    FIRST: if the account is down past the daily-loss or drawdown limit (or a
+    manual halt file exists), new buys are skipped (exits still allowed).
+    """
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level=getattr(args, "log_level", "INFO"))
+    live = getattr(args, "live", False)
+
+    async def _daily() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.strategies.safe_compounder import SafeCompounder
+        from src.risk.risk_governor import RiskGovernor
+        from src.data.collector import snapshot_account
+
+        client = KalshiClient()
+        try:
+            gov = RiskGovernor(kalshi_client=client)
+            decision = await gov.check()
+
+            print("=" * 60)
+            print(f"  DAILY RUN — {'LIVE' if live else 'DRY-RUN'} — {datetime.now():%Y-%m-%d %H:%M}")
+            print("=" * 60)
+            print(
+                f"  Governor: {'🛑 HALTED' if decision.halted else '✅ OK'} | "
+                f"equity ${decision.current_equity_cents/100:.2f} | "
+                f"day P&L ${decision.daily_pnl_cents/100:+.2f} | "
+                f"dd {decision.drawdown_pct:.1f}%"
+            )
+            for r in decision.reasons:
+                print(f"   ! {r}")
+
+            await snapshot_account(
+                client, tag="daily_open",
+                meta={"governor": decision.to_dict(), "live": live},
+            )
+
+            trade_live = live and not decision.halted
+            if decision.halted and live:
+                print("  Governor HALTED — skipping new buys (exits still allowed).")
+
+            compounder = SafeCompounder(client=client, dry_run=not trade_live)
+            results = await compounder.run()
+
+            snap = await snapshot_account(
+                client, tag="daily_close",
+                meta={"results": results, "live": live, "halted": decision.halted},
+            )
+
+            print("=" * 60)
+            print(
+                f"  RESULT: orders={results.get('placed', 0)} "
+                f"filled={results.get('filled', 0)} "
+                f"deployed=${results.get('total_deployed', 0)/100:.2f} "
+                f"errors={results.get('errors', 0)} | "
+                f"equity ${snap['equity_cents']/100:.2f}"
+            )
+            print("=" * 60)
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(_daily())
+    except KeyboardInterrupt:
+        print("\nDaily run interrupted by user.")
+
+
+def cmd_brief(args: argparse.Namespace) -> None:
+    """Print a structured situational-awareness snapshot for the agent (JSON)."""
+    import json
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    async def _b() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.toolbelt import account_brief
+
+        client = KalshiClient()
+        try:
+            print(json.dumps(await account_brief(client), indent=2))
+        finally:
+            await client.close()
+
+    asyncio.run(_b())
+
+
+def cmd_trade(args: argparse.Namespace) -> None:
+    """Place ONE guarded, journaled order — the agent's hands. Dry by default."""
+    import json
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    async def _t() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.toolbelt import place_guarded_order
+
+        client = KalshiClient()
+        try:
+            res = await place_guarded_order(
+                client, ticker=args.ticker, side=args.side, count=args.count,
+                price=args.price, type_=args.type, rationale=args.rationale or "",
+                est_prob=args.est_prob, category=args.category or "",
+                max_position_pct=args.max_pct, dry=not args.live,
+                override_policy=getattr(args, "override_policy", False),
+                expiration_ts=(int(time.time()) + args.expires_min * 60) if getattr(args, "expires_min", None) else None,
+            )
+            print(json.dumps(res, indent=2))
+        finally:
+            await client.close()
+
+    asyncio.run(_t())
+
+
+def cmd_close(args: argparse.Namespace) -> None:
+    """Close (sell) a single position with a marketable limit. Dry by default."""
+    import json
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    async def _c() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.toolbelt import close_position
+
+        client = KalshiClient()
+        try:
+            res = await close_position(
+                client, ticker=args.ticker, count=args.count, price=args.price,
+                rationale=args.rationale or "close position", dry=not args.live,
+            )
+            print(json.dumps(res, indent=2))
+        finally:
+            await client.close()
+
+    asyncio.run(_c())
+
+
+def cmd_settle(args: argparse.Namespace) -> None:
+    """Record settled outcomes and report realized edge (win-rate, P&L)."""
+    import json
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    async def _s() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.settle import (
+            fetch_settlements, settlement_pnl, record_settlements,
+            summarize_settlements, load_settlements,
+        )
+
+        client = KalshiClient()
+        try:
+            raw = await fetch_settlements(client, limit=300)
+            mine = [s for s in (settlement_pnl(r) for r in raw) if s]
+            new = record_settlements(mine)
+            summary = summarize_settlements(load_settlements())
+            print(json.dumps({"new_this_run": len(new), "new": new, "realized_edge": summary}, indent=2))
+        finally:
+            await client.close()
+
+    asyncio.run(_s())
+
+
+def cmd_fills(args: argparse.Namespace) -> None:
+    """Reconcile the decision journal against actual order fills.
+
+    A journal record is written at order placement, but a resting maker order
+    can be cancelled unfilled (or partially filled) afterwards. This command
+    pulls the account's fills and resting orders, voids journal records whose
+    orders never filled, and shrinks partially-filled counts — so calibration
+    and the Edge Policy only ever learn from trades that actually executed.
+    Pass --dry for a read-only preview.
+    """
+    import json
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+    dry = getattr(args, "dry", False)
+
+    async def _f() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.journal import load_journal, reconcile_fills, write_journal
+
+        journal = load_journal()
+        candidates = [
+            r for r in journal
+            if r.get("order_id") and not r.get("outcome") and not r.get("voided")
+        ]
+
+        client = KalshiClient()
+        skipped: list = []
+        fills: list = []
+        try:
+            resting = (await client.get_orders(status="resting")).get("orders", [])
+            resting_ids = {o.get("order_id") for o in resting if o.get("order_id")}
+            # Per-order queries: exact evidence for each order, immune to the
+            # recency window of the unscoped fills endpoint (absence of a fill
+            # in the last-N window is NOT evidence the order never filled).
+            for rec in candidates:
+                oid = rec["order_id"]
+                if oid in resting_ids:
+                    continue
+                try:
+                    fills.extend(
+                        (await client.get_fills(order_id=oid, limit=200)).get("fills", [])
+                    )
+                except Exception:
+                    # Fail safe: no evidence -> record stays untouched.
+                    skipped.append({"ticker": rec.get("ticker"), "order_id": oid})
+                    resting_ids.add(oid)
+        finally:
+            await client.close()
+
+        updated, changes = reconcile_fills(journal, fills, resting_ids)
+        if changes and not dry:
+            write_journal(updated)
+        print(json.dumps({
+            "dry": dry,
+            "records": len(journal),
+            "checked": len(candidates),
+            "changes": changes,
+            "skipped_no_evidence": skipped,
+            "written": bool(changes and not dry),
+        }, indent=2))
+
+    asyncio.run(_f())
+
+
+def cmd_learnings(args: argparse.Namespace) -> None:
+    """Reconcile settled outcomes into the journal, then surface candidate learnings.
+
+    The integrated LEARN step: pull live settlements, join them back into
+    decision_journal.jsonl (filling each trade's outcome), print the calibration
+    and per-category/side edge tables, run the deterministic flag-rules over those
+    tables, and append any genuinely NEW candidate learnings to learnings.jsonl.
+
+    Defaults to writing back reconciled outcomes + new learnings. Pass --dry for a
+    read-only preview (no journal or learnings writes). Pass --json for machine
+    output instead of the human tables.
+    """
+    import json
+    from datetime import date as _date
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    dry = getattr(args, "dry", False)
+    as_json = getattr(args, "json", False)
+    today = _date.today().isoformat()
+
+    async def _l() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.settle import fetch_settlements, settlement_pnl
+        from src.agent.journal import load_journal, write_journal, DEFAULT_JOURNAL_PATH
+        from src.agent.learnings import (
+            reconcile_outcomes, calibration_table, edge_breakdown,
+            flag_rules, append_learnings, load_learnings, DEFAULT_LEARNINGS_PATH,
+        )
+
+        client = KalshiClient()
+        try:
+            raw = await fetch_settlements(client, limit=300)
+        finally:
+            await client.close()
+
+        settlements = [s for s in (settlement_pnl(r) for r in raw) if s]
+        journal = load_journal()
+        reconciled, newly = reconcile_outcomes(journal, settlements)
+        if not dry and newly:
+            write_journal(reconciled, DEFAULT_JOURNAL_PATH)
+
+        calibration = calibration_table(reconciled)
+        edges = edge_breakdown(reconciled)
+        candidates = flag_rules(calibration, edges, today)
+        if dry:
+            existing = {(c.get("kind"), c.get("claim")) for c in load_learnings(DEFAULT_LEARNINGS_PATH)}
+            new_learnings = [c for c in candidates if (c.get("kind"), c.get("claim")) not in existing]
+        else:
+            new_learnings = append_learnings(candidates, DEFAULT_LEARNINGS_PATH)
+
+        if as_json:
+            print(json.dumps({
+                "date": today,
+                "dry": dry,
+                "reconciled": newly,
+                "settled_total": sum(1 for r in reconciled if r.get("outcome")),
+                "calibration": calibration,
+                "edges": edges,
+                "candidates": candidates,
+                "new_learnings": new_learnings,
+            }, indent=2))
+            return
+
+        print("=" * 64)
+        print(f"  LEARNINGS — {today}{'  (DRY: no writes)' if dry else ''}")
+        print("=" * 64)
+        print(f"  Reconciled this run: {newly} new outcome(s)")
+        settled_n = sum(1 for r in reconciled if r.get("outcome"))
+        print(f"  Settled journal trades: {settled_n} / {len(reconciled)}")
+        print()
+
+        print("  CALIBRATION (predicted vs. actual win-rate)")
+        if calibration:
+            print(f"  {'bucket':<14} {'n':>4} {'pred':>7} {'actual':>7}")
+            print(f"  {'-'*14} {'-'*4} {'-'*7} {'-'*7}")
+            for b in calibration:
+                print(f"  {b['bucket']:<14} {b['n']:>4} {b['predicted']:>6.0%} {b['actual']:>6.0%}")
+        else:
+            print("  (no settled trades with est_prob yet)")
+        print()
+
+        print("  EDGE BREAKDOWN")
+        for dim in ("by_category", "by_side", "by_method"):
+            table = edges.get(dim, {})
+            if not table:
+                continue
+            print(f"  {dim.replace('by_', 'by ')}:")
+            print(f"    {'group':<18} {'n':>4} {'WR':>6} {'P&L':>9} {'entryEdge':>9} {'realEdge':>9}")
+            for label, s in sorted(table.items()):
+                wr = f"{s['win_rate']:.0%}" if s['win_rate'] is not None else "n/a"
+                ee = f"{s['avg_entry_edge']:+.3f}" if s['avg_entry_edge'] is not None else "n/a"
+                re_ = f"{s['realized_edge']:+.3f}" if s['realized_edge'] is not None else "n/a"
+                print(f"    {label[:18]:<18} {s['n']:>4} {wr:>6} ${s['pnl']:>7.2f} {ee:>9} {re_:>9}")
+        print()
+
+        print("  CANDIDATE LEARNINGS")
+        if not candidates:
+            print("  (none flagged — no n>=5 group is losing and no band is overconfident)")
+        for c in candidates:
+            is_new = c in new_learnings
+            tag = "NEW" if is_new else "seen"
+            print(f"  [{tag}] ({c['confidence']}/{c['kind']}) {c['claim']}")
+        if not dry:
+            print()
+            print(f"  Appended {len(new_learnings)} new learning(s) to learnings.jsonl")
+        print("=" * 64)
+
+    asyncio.run(_l())
+
+
+def _render_policy(policy: dict) -> None:
+    """Human-readable view of an Edge Policy. Shared by `policy` and `improve`."""
+    meta = policy.get("meta", {})
+    print("=" * 64)
+    print(f"  EDGE POLICY — {meta.get('generated_date', '?')}"
+          f"   (derived from {meta.get('settled_n', 0)} settled trades)")
+    print("=" * 64)
+    print("  The pre-trade gate your OWN settled record earns.")
+    print("  Honest gating: a group with n<5 settled trades gets no opinion.")
+    print()
+
+    print("  BLOCKS — category/method your record proves lose money (hard stop)")
+    blocks = sorted(policy.get("blocks", []), key=lambda b: b.get("pnl", 0))
+    if blocks:
+        for b in blocks:
+            print(f"    {b['dimension']}={b['label'][:22]:<22} "
+                  f"n={b['n']:>3}   pnl=${b['pnl']:>9.2f}")
+    else:
+        print("    (none — no n>=5 category/method is net-negative)")
+    print()
+
+    print("  SIDE WARNINGS — advisory only, never disables a side wholesale")
+    warnings = sorted(policy.get("warnings", []), key=lambda w: w.get("pnl", 0))
+    if warnings:
+        for w in warnings:
+            print(f"    side={w['label'][:6]:<6} n={w['n']:>3}   "
+                  f"pnl=${w['pnl']:>9.2f}")
+    else:
+        print("    (none)")
+    print()
+
+    print("  HAIRCUTS — est_prob bands you're overconfident in (shrink estimate)")
+    haircuts = policy.get("haircuts", [])
+    if haircuts:
+        for h in haircuts:
+            print(f"    {h['band']:<14} n={h['n']:>3}   "
+                  f"overconfident by {h['gap']:.0%} → shrink est_prob to {h['shrink_to']:.2f}")
+    else:
+        print("    (none — every n>=5 band is well-calibrated)")
+    print("=" * 64)
+
+
+def cmd_policy(args: argparse.Namespace) -> None:
+    """Show the data-driven Edge Policy your settled record earns. Read-only.
+
+    Derives the policy LIVE from your local settled data (the authoritative
+    settlements log + your decision journal) and prints it: which category/method
+    groups to BLOCK, which sides to warn on, which est_prob bands to haircut. This
+    is the honest gate — it never asserts a rule a thin (n<5) sample can't support.
+
+    Needs no network and no keys — it reads local files. Pass --demo to run
+    against the shipped fixture (great on a fresh clone), --json for machine
+    output. `cli improve` is what pulls fresh settlements and persists the policy
+    as the active pre-trade gate.
+    """
+    import json
+    from datetime import date as _date
+    from src.agent.journal import load_journal, DEFAULT_JOURNAL_PATH
+    from src.agent.settle import load_settlements, DEFAULT_SETTLEMENTS_PATH
+    from src.agent.learnings import edge_breakdown, calibration_table
+    from src.agent.policy import build_settled_records, derive_policy, load_policy
+
+    today = _date.today().isoformat()
+    if getattr(args, "demo", False):
+        settlements = load_settlements("tests/fixtures/demo_settlements.jsonl")
+        journal = load_journal("tests/fixtures/demo_journal.jsonl")
+    else:
+        settlements = load_settlements(DEFAULT_SETTLEMENTS_PATH)
+        journal = load_journal(DEFAULT_JOURNAL_PATH)
+
+    records = build_settled_records(journal, settlements)
+    policy = derive_policy(edge_breakdown(records), calibration_table(records), date=today)
+
+    if getattr(args, "json", False):
+        print(json.dumps(policy, indent=2))
+        return
+
+    _render_policy(policy)
+    active = load_policy()
+    if active is None:
+        print("  No active gate saved yet. Run `cli improve` to persist this as")
+        print("  the pre-trade gate (data/runtime/edge_policy.json).")
+    elif active != policy:
+        print("  NOTE: the saved active gate differs from this fresh derivation.")
+        print("  Run `cli improve` to update it.")
+
+
+def cmd_improve(args: argparse.Namespace) -> None:
+    """Run the self-improvement loop: settle → reconcile → re-derive → persist.
+
+    The visible heartbeat of the learning system. It pulls Kalshi's authoritative
+    settlements, reconciles them into the decision journal (filling outcomes),
+    re-derives the Edge Policy from the whole settled record, diffs it against the
+    currently-saved gate to show WHAT the newest settlements changed and why, then
+    saves the new policy as the active pre-trade gate.
+
+    Default writes (records settlements, reconciles the journal, saves the policy).
+    Pass --dry for a full read-only preview (no writes anywhere). --json for
+    machine output. Falls back to the local settlements log if the live pull fails
+    (e.g. no keys), so the loop still runs offline.
+    """
+    import json
+    from datetime import date as _date
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+    dry = getattr(args, "dry", False)
+    as_json = getattr(args, "json", False)
+    today = _date.today().isoformat()
+
+    async def _i() -> None:
+        from src.agent.settle import (
+            fetch_settlements, settlement_pnl, record_settlements,
+            load_settlements, DEFAULT_SETTLEMENTS_PATH,
+        )
+        from src.agent.journal import load_journal, write_journal, DEFAULT_JOURNAL_PATH
+        from src.agent.learnings import reconcile_outcomes, edge_breakdown, calibration_table
+        from src.agent.policy import (
+            merge_settlement_records, derive_policy, diff_policy,
+            load_policy, save_policy, DEFAULT_POLICY_PATH,
+        )
+
+        # 1. SETTLE — pull authoritative outcomes (fall back to local on failure).
+        pulled = 0
+        try:
+            from src.clients.kalshi_client import KalshiClient
+            client = KalshiClient()
+            try:
+                raw = await fetch_settlements(client, limit=300)
+            finally:
+                await client.close()
+            mine = [s for s in (settlement_pnl(r) for r in raw) if s]
+            pulled = len(mine)
+            if not dry and mine:
+                record_settlements(mine, DEFAULT_SETTLEMENTS_PATH)
+        except Exception as exc:  # offline / no keys — use what we already have
+            print(f"  (live settlement pull unavailable: {exc}; using local log)")
+
+        settlements = load_settlements(DEFAULT_SETTLEMENTS_PATH)
+
+        # 2. RECONCILE — join settlements back into the journal.
+        journal = load_journal(DEFAULT_JOURNAL_PATH)
+        reconciled, newly = reconcile_outcomes(journal, settlements)
+        if not dry and newly:
+            write_journal(reconciled, DEFAULT_JOURNAL_PATH)
+
+        # 3. DERIVE — re-derive the policy from the whole settled record. Reuse
+        # the reconciled list from step 2 (single reconciliation per run).
+        records = merge_settlement_records(reconciled, settlements)
+        new_policy = derive_policy(
+            edge_breakdown(records), calibration_table(records), date=today)
+
+        # 4. DIFF — what did the newest settlements change?
+        old_policy = load_policy(DEFAULT_POLICY_PATH) or {
+            "meta": {}, "blocks": [], "warnings": [], "haircuts": []}
+        delta = diff_policy(old_policy, new_policy)
+
+        # 5. PERSIST — save as the active gate (unless dry).
+        if not dry:
+            save_policy(new_policy, DEFAULT_POLICY_PATH)
+
+        if as_json:
+            print(json.dumps({
+                "date": today, "dry": dry, "settlements_pulled": pulled,
+                "reconciled": newly, "diff": delta, "policy": new_policy,
+            }, indent=2))
+            return
+
+        _render_policy(new_policy)
+        print(f"  LOOP: pulled {pulled} settlement(s), reconciled {newly} new outcome(s)")
+        print()
+        print("  CHANGES since the last saved gate:")
+        changed = False
+        for b in delta["added_blocks"]:
+            changed = True
+            print(f"    + BLOCK {b['dimension']}={b['label']} (n={b['n']}, ${b['pnl']:.2f})")
+        for b in delta["removed_blocks"]:
+            changed = True
+            print(f"    - unblock {b['dimension']}={b['label']}")
+        for h in delta["changed_haircuts"]:
+            changed = True
+            print(f"    ~ haircut {h['band']}: shrink {h['was']} → {h['now']}")
+        if not changed:
+            print("    (no change — the newest settlements didn't move the gate)")
+        print()
+        if dry:
+            print("  DRY: nothing written (no settlements recorded, journal + gate untouched).")
+        else:
+            print(f"  Saved active gate → {DEFAULT_POLICY_PATH}")
+        print("=" * 64)
+
+    asyncio.run(_i())
+
+
+def cmd_edge(args: argparse.Namespace) -> None:
+    """Prove (or disprove) edge against the sharp Kalshi book — the headline metric.
+
+    The edge-measurement harness. Pull live settlements, reconcile them into the
+    decision journal (in memory — this command writes nothing), then score my
+    settled trades: Brier / log-loss calibration, realized edge-vs-book
+    attribution (did my fills beat the price the book charged?), the calibration
+    curve, and an out-of-sample (forward-only) honesty split. Prints an honest,
+    gated verdict that refuses to claim edge on thin (n<10) or non-forward data.
+
+    Read-only: it MEASURES, it never trades or writes. Pass --json for machine
+    output instead of the human table.
+    """
+    import json
+    from datetime import date as _date
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    as_json = getattr(args, "json", False)
+    today = _date.today().isoformat()
+
+    async def _e() -> None:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.settle import fetch_settlements, settlement_pnl
+        from src.agent.journal import load_journal
+        from src.agent.learnings import reconcile_outcomes
+        from src.agent.edge import edge_report
+
+        client = KalshiClient()
+        try:
+            raw = await fetch_settlements(client, limit=300)
+        finally:
+            await client.close()
+
+        settlements = [s for s in (settlement_pnl(r) for r in raw) if s]
+        journal = load_journal()
+        # Read-only: reconcile in memory only; we never persist here.
+        reconciled, _ = reconcile_outcomes(journal, settlements)
+        report = edge_report(reconciled, today)
+        _print_edge_report(report, as_json)
+
+    asyncio.run(_e())
+
+
+def _print_edge_report(report: dict, as_json: bool) -> None:
+    """Render an ``edge_report`` dict as JSON or a human table. Pure presentation."""
+    import json
+
+    if as_json:
+        print(json.dumps(report, indent=2))
+        return
+
+    def _fmt_metric(m):
+        return f"{m['value']:.4f} (n={m['n']})" if m else "n/a (no scorable trades)"
+
+    print("=" * 70)
+    print(f"  EDGE vs. THE BOOK — {report['date']}")
+    print("=" * 70)
+    print(
+        f"  Settled: {report['n_settled']}  |  "
+        f"forward: {report['n_forward']}  |  "
+        f"suspect: {report['n_suspect']}  |  "
+        f"unknown: {report['n_unknown']}"
+    )
+    print("  (only FORWARD-settled trades — market resolved AFTER I traded —")
+    print("   count toward edge; suspect/unknown are excluded as un-confirmable.)")
+    print()
+    print(f"  Brier score:  {_fmt_metric(report['brier'])}   (lower better; 0.25 = coin flip)")
+    print(f"  Log loss:     {_fmt_metric(report['log_loss'])}   (lower better)")
+    print()
+
+    ev = report["edge_vs_book"]
+    overall = ev.get("overall")
+    print("  EDGE vs. BOOK (realized win-rate − price the book charged)")
+    if overall:
+        print(
+            f"    overall: n={overall['n']}  won={overall['realized_winrate']:.0%}  "
+            f"implied={overall['mean_implied']:.0%}  "
+            f"edge={overall['edge_vs_book']:+.4f}  "
+            f"pnl/contract=${overall['pnl_per_contract']:+.3f}"
+        )
+    else:
+        print("    (no forward-settled trades with a fill price yet)")
+
+    for dim_key, dim_label in (("by_category", "by category"), ("by_side", "by side")):
+        table = ev.get(dim_key, {})
+        if not table:
+            continue
+        print(f"    {dim_label}:")
+        print(f"      {'group':<18} {'n':>4} {'won':>6} {'implied':>8} {'edge':>9} {'pnl/ct':>9}")
+        for label, s in sorted(table.items()):
+            print(
+                f"      {label[:18]:<18} {s['n']:>4} {s['realized_winrate']:>5.0%} "
+                f"{s['mean_implied']:>7.0%} {s['edge_vs_book']:>+9.4f} "
+                f"${s['pnl_per_contract']:>+7.3f}"
+            )
+    print()
+
+    cal = report["calibration_table"]
+    print("  CALIBRATION (predicted vs. actual win-rate, forward trades)")
+    if cal:
+        print(f"    {'bucket':<14} {'n':>4} {'pred':>7} {'actual':>7}")
+        for b in cal:
+            print(f"    {b['bucket']:<14} {b['n']:>4} {b['predicted']:>6.0%} {b['actual']:>6.0%}")
+    else:
+        print("    (no forward-settled trades with est_prob yet)")
+    print()
+
+    print(f"  VERDICT: {report['verdict']}")
+    print("=" * 70)
+
+
+def cmd_report(args: argparse.Namespace) -> None:
+    """Render the public track record (docs/TRACK_RECORD.md) from persisted data.
+
+    Reads only what the loop already persists — the settlements corpus, the
+    decision journal, and the saved Edge Policy — and renders the honest public
+    track-record page. Works fully offline; the live account snapshot is
+    best-effort and the page notes its absence rather than failing. Pass
+    --stdout to print instead of writing the file.
+    """
+    from datetime import date as _date
+    from pathlib import Path
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    from src.agent.edge import edge_report
+    from src.agent.journal import load_journal
+    from src.agent.learnings import reconcile_outcomes
+    from src.agent.policy import load_policy
+    from src.agent.report import render_track_record
+    from src.agent.settle import load_settlements, summarize_settlements
+
+    settlements = load_settlements()
+    journal = load_journal()
+    # In-memory only — this command never writes journal or settlement state.
+    reconciled, _ = reconcile_outcomes(journal, settlements)
+
+    equity = None
+    try:
+        async def _brief() -> dict:
+            from src.clients.kalshi_client import KalshiClient
+            from src.agent.toolbelt import account_brief
+
+            client = KalshiClient()
+            try:
+                return await account_brief(client)
+            finally:
+                await client.close()
+
+        equity = asyncio.run(_brief())
+    except Exception:
+        pass  # offline render is a supported mode, not an error
+
+    # A governor peak re-baseline must not hide the all-time drawdown publicly.
+    audit = Path("data/runtime/governor_audit.jsonl")
+    if equity and audit.exists():
+        import json
+
+        rebases = [json.loads(l) for l in audit.read_text().splitlines() if l.strip()]
+        rebases = [r for r in rebases if r.get("action") == "rebase_peak"]
+        if rebases:
+            equity["rebase"] = {
+                "date": rebases[-1]["new"]["date"],
+                "prior_peak_cents": max(r["old"]["peak_equity_cents"] for r in rebases),
+            }
+
+    md = render_track_record(
+        date=_date.today().isoformat(),
+        equity=equity,
+        settle_summary=summarize_settlements(settlements),
+        edge=edge_report(reconciled, _date.today().isoformat()),
+        policy=load_policy(),
+    )
+    if getattr(args, "stdout", False):
+        print(md)
+        return
+    out = Path("docs/TRACK_RECORD.md")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(md, encoding="utf-8")
+    print(f"wrote {out}")
+
+
+def cmd_verify(args: argparse.Namespace) -> None:
+    """Adversarial-verify a single ticker: research -> skeptic -> deterministic verdict.
+
+    Reads the LIVE orderbook to get the executable NO ask we'd fade, fetches the
+    market title for context, then runs the research/skeptic/calibrator pipeline
+    (``src.agent.verify.run_verify``) with the OpenRouter client injected as the
+    LLM. The verdict gate is deterministic — it recomputes the edge in points and
+    only says BUY_NO when the fade survives the skeptic AND clears every discipline
+    rule. READ-ONLY: never places an order, never writes the journal. Pass --json
+    for machine output.
+    """
+    import json
+    import re
+    from src.utils.logging_setup import setup_logging
+
+    setup_logging(log_level="WARNING")
+
+    as_json = getattr(args, "json", False)
+    ticker = args.ticker
+    research_file = getattr(args, "research_file", None)
+    use_jev = getattr(args, "jev", False)
+    jev_record: dict = {}
+
+    async def _run() -> dict:
+        from src.clients.kalshi_client import KalshiClient
+        from src.agent.verify import run_verify
+
+        client = KalshiClient()
+        try:
+            # 1. Live executable NO ask off the orderbook (best no_ask = 1 - best yes bid).
+            ob = await client.get_orderbook(ticker, depth=10)
+            o = ob.get("orderbook_fp", {}) or {}
+            yes = [(float(p), float(s)) for p, s in (o.get("yes_dollars") or [])]
+            yb = max((p for p, _s in yes), default=None)  # best yes bid
+            no_ask = round(1 - yb, 2) if yb is not None else None
+            if no_ask is None:
+                raise RuntimeError(
+                    f"no executable NO ask for {ticker} (empty/one-sided book) — nothing to fade"
+                )
+
+            # 2. Human question/title — best-effort, never crash on a missing field.
+            question = ticker
+            try:
+                m = (await client.get_market(ticker)).get("market", {}) or {}
+                etitle = m.get("title") or m.get("event_title") or ""
+                sub = m.get("yes_sub_title") or m.get("subtitle") or m.get("no_sub_title") or ""
+                combined = (etitle + (" :: " + sub if sub else "")).strip(" :")
+                if combined:
+                    question = combined
+            except Exception:  # noqa: BLE001
+                pass
+
+            candidate = {"ticker": ticker, "question": question, "no_ask": no_ask}
+
+            # 3. The injected LLM: an operator research file when supplied
+            #    (agent-native, no API key), else the OpenRouter adapter.
+            if research_file:
+                from pathlib import Path as _Path
+                from src.agent.verify import make_operator_llm
+
+                payload = json.loads(_Path(research_file).read_text(encoding="utf-8"))
+                llm_call = make_operator_llm(payload)
+            else:
+                from src.clients.openrouter_client import OpenRouterClient
+                from json_repair import repair_json
+
+                or_client = OpenRouterClient()
+
+                async def llm_call(prompt: str, schema: dict) -> dict:
+                    schema_keys = ", ".join(schema.get("required", []))
+                    full = (
+                        prompt
+                        + f"\n\nReturn ONLY a JSON object with these keys: {schema_keys}. "
+                        "No markdown, no prose."
+                    )
+                    raw = await or_client.get_completion(
+                        full, temperature=0.1, max_tokens=2000,
+                        strategy="verify", query_type="verify",
+                    )
+                    if raw is None:
+                        raise RuntimeError("LLM unavailable (daily limit hit or all models failed)")
+                    # Robust JSON parse: ```json fence, then bare {...}, then repair.
+                    fence = re.search(r"```(?:json)?\s*(.*?)\s*```", raw, re.DOTALL)
+                    if fence:
+                        json_str = fence.group(1)
+                    else:
+                        bare = re.search(r"\{.*\}", raw, re.DOTALL)
+                        if not bare:
+                            raise RuntimeError(f"no JSON object in LLM response: {raw[:200]!r}")
+                        json_str = bare.group(0)
+                    try:
+                        return json.loads(json_str)
+                    except json.JSONDecodeError:
+                        repaired = repair_json(json_str)
+                        if not repaired:
+                            raise RuntimeError(f"could not parse/repair LLM JSON: {json_str[:200]!r}")
+                        return json.loads(repaired)
+
+            # 3b. Optional Jev floor: an independent calibrated P(YES) from the
+            #     researched facts; can only make the gate stricter.
+            if use_jev:
+                from src.agent.jev import with_jev_floor
+
+                facts = payload.get("facts") if research_file else None
+                llm_call = with_jev_floor(llm_call, question, facts=facts, record=jev_record)
+
+            # 4. Run the pure pipeline with the injected IO.
+            verdict = await run_verify(candidate, llm_call)
+            return {"candidate": candidate, "verdict": verdict}
+        finally:
+            await client.close()
+
+    out = asyncio.run(_run())
+    candidate = out["candidate"]
+    verdict = out["verdict"]
+
+    if jev_record:
+        verdict["jev_true_yes_pct"] = round(jev_record["jev_true_yes_pct"], 1)
+
+    if as_json:
+        print(json.dumps(verdict, indent=2))
+        return
+
+    no_ask = float(candidate["no_ask"])
+    implied_yes = round((1.0 - no_ask) * 100.0)
+    print("=" * 70)
+    print(f"  ADVERSARIAL VERIFY — {verdict['ticker']}")
+    if research_file:
+        print(f"  (research source: operator file {research_file} — judgments supplied,")
+        print("   edge still recomputed off the live book)")
+    print("=" * 70)
+    print(f"  {candidate['question']}")
+    print(f"  NO ask: {no_ask:.2f}  (implied YES {implied_yes}%)")
+    print("-" * 70)
+    print(f"  recommend:  {verdict['recommend']}   (size: {verdict['size_hint']})")
+    print(f"  edge:       {verdict['edge_pts']:+d} pts   survives skeptic: {verdict['survives']}")
+    print(f"  true-YES:   {verdict['true_yes']:.0f}%   direction: {verdict['direction']}")
+    if jev_record:
+        print(f"  Jev P(YES): {jev_record['jev_true_yes_pct']:.1f}%   (floor on true-YES; ~typesafe/jev-latest)")
+    print()
+    print(f"  {verdict['note']}")
+    print("=" * 70)
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
@@ -492,20 +1363,25 @@ def cmd_close_all(args: argparse.Namespace) -> None:
 
 
 def cmd_backtest(args: argparse.Namespace) -> None:
-    """Run backtests (placeholder)."""
-    print("=" * 56)
-    print("  BACKTESTING")
-    print("=" * 56)
+    """Honest status of backtesting — and what to use instead today."""
+    print("=" * 64)
+    print("  BACKTESTING — not shipped yet, and here's the honest why")
+    print("=" * 64)
     print()
-    print("  Backtesting engine coming soon.")
+    print("  A real strategy backtest needs a market-price + settled-outcome")
+    print("  corpus captured over time. This repo does not ship one (the local")
+    print("  market catalog has no price history and no settled outcomes), so a")
+    print("  backtest engine would have nothing real to score. Building that")
+    print("  capture corpus is the next slice; a backtest follows it.")
     print()
-    print("  Planned features:")
-    print("    - Historical market replay")
-    print("    - Strategy parameter optimization")
-    print("    - Walk-forward analysis")
-    print("    - Monte Carlo simulation")
+    print("  What works TODAY — the feedback loop that needs no corpus:")
+    print("    python cli.py edge       prove/disprove edge on your settled trades")
+    print("    python cli.py policy     the gate your settled record earns")
+    print("    python cli.py improve    settle -> learn -> re-derive the gate")
     print()
-    print("=" * 56)
+    print("  Your own settled outcomes constrain your next trade. That is the")
+    print("  self-improvement loop — and it's real, not a placeholder.")
+    print("=" * 64)
 
 
 def cmd_health(args: argparse.Namespace) -> None:
@@ -703,6 +1579,254 @@ def build_parser() -> argparse.ArgumentParser:
         help="Set logging verbosity (default: INFO)",
     )
     p_run.set_defaults(func=cmd_run)
+
+    # --- daily ---
+    p_daily = subparsers.add_parser(
+        "daily",
+        help="Bounded once-through daily run (governor + governed trade + snapshot)",
+        description=(
+            "Run a single governed trading cycle and exit — the right shape for a "
+            "cron/launchd schedule. The risk governor (daily-loss + drawdown kill "
+            "switch) runs first; new buys are skipped if halted. Defaults to dry-run; "
+            "pass --live to place real orders."
+        ),
+    )
+    dgrp = p_daily.add_mutually_exclusive_group()
+    dgrp.add_argument("--live", action="store_true",
+                      help="Place real orders (default: dry-run)")
+    dgrp.add_argument("--paper", action="store_true",
+                      help="Dry-run (no real orders)")
+    p_daily.add_argument("--log-level", type=str, default="INFO",
+                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                         help="Logging verbosity (default: INFO)")
+    p_daily.set_defaults(func=cmd_daily)
+
+    # --- brief (agent situational awareness) ---
+    p_brief = subparsers.add_parser(
+        "brief",
+        help="Structured situational awareness: governor, equity, positions, resting orders (JSON)",
+        description="One-shot agent snapshot for /loop ticks. Read-only.",
+    )
+    p_brief.set_defaults(func=cmd_brief)
+
+    # --- trade (agent's guarded order tool) ---
+    p_trade = subparsers.add_parser(
+        "trade",
+        help="Place ONE guarded, journaled order (the agent's hands). Dry by default.",
+        description=(
+            "Place a single order through the full guard stack (risk governor, "
+            "price sanity, position+cash caps) and journal the prediction "
+            "(est-prob, edge, rationale) for calibration. Defaults to a dry-run "
+            "preview; pass --live to actually place."
+        ),
+    )
+    p_trade.add_argument("--ticker", required=True, help="Market ticker")
+    p_trade.add_argument("--side", required=True, choices=["yes", "no"])
+    p_trade.add_argument("--count", type=int, required=True, help="Intended contracts (auto-capped)")
+    p_trade.add_argument("--price", type=float, default=None,
+                         help="Limit price in dollars for the chosen side; default = current ask")
+    p_trade.add_argument("--type", dest="type", default="limit", choices=["limit", "market"])
+    p_trade.add_argument("--est-prob", dest="est_prob", type=float, default=None,
+                         help="Your estimated probability the bought side wins (drives edge + calibration)")
+    p_trade.add_argument("--rationale", default="", help="Why you're making this trade (journaled)")
+    p_trade.add_argument("--category", default="", help="Market category (journaled)")
+    p_trade.add_argument("--max-pct", dest="max_pct", type=float, default=0.10,
+                         help="Max fraction of equity per position (default 0.10)")
+    p_trade.add_argument("--override-policy", dest="override_policy", action="store_true",
+                         help="Override an Edge Policy BLOCK (recorded on the order). The gate "
+                              "reflects your settled record — override only with a stronger reason.")
+    p_trade.add_argument("--live", action="store_true",
+                         help="Actually place the order (default: dry-run preview)")
+    p_trade.set_defaults(func=cmd_trade)
+
+    # --- close (agent's guarded sell/exit tool) ---
+    p_close = subparsers.add_parser(
+        "close",
+        help="Close (sell) ONE position with a marketable limit. Dry by default.",
+        description=(
+            "Sell the side actually held for a ticker (capped to held count) at "
+            "the current bid, and journal it. Allowed even when the governor is "
+            "halted (selling reduces risk). Defaults to dry-run; pass --live."
+        ),
+    )
+    p_trade.add_argument(
+        "--expires-min", type=int, default=None,
+        help="Expire a resting limit order after N minutes (resting-bid nets must not go stale)",
+    )
+    p_close.add_argument("--ticker", required=True, help="Market ticker to close")
+    p_close.add_argument("--count", type=int, default=None,
+                         help="Contracts to sell (default: all held)")
+    p_close.add_argument("--price", type=float, default=None,
+                         help="Limit sell price in dollars (default: current bid)")
+    p_close.add_argument("--rationale", default="", help="Why you're closing (journaled)")
+    p_close.add_argument("--live", action="store_true",
+                         help="Actually place the sell (default: dry-run preview)")
+    p_close.set_defaults(func=cmd_close)
+
+    # --- settle (record realized outcomes, measure edge) ---
+    p_settle = subparsers.add_parser(
+        "settle",
+        help="Record settled outcomes and report realized edge (win-rate, P&L)",
+        description=(
+            "Pull Kalshi's authoritative settlement records for positions held, "
+            "append new ones to the local settlements log, and summarize realized "
+            "win-rate and P&L by side. This is the learning-loop measurement."
+        ),
+    )
+    p_settle.set_defaults(func=cmd_settle)
+
+    # --- learnings (reconcile outcomes -> calibration/edge -> candidate learnings) ---
+    p_learn = subparsers.add_parser(
+        "learnings",
+        help="Reconcile settled outcomes into the journal and surface candidate learnings",
+        description=(
+            "The integrated LEARN step. Pull live settlements, join them back into "
+            "the decision journal (filling each trade's outcome), print the "
+            "calibration table and per-category/side realized edge, run the "
+            "deterministic flag-rules over those tables, and append any genuinely "
+            "new candidate learnings to learnings.jsonl. Defaults to writing back "
+            "reconciled outcomes + new learnings; pass --dry for a read-only "
+            "preview. Pass --json for machine output."
+        ),
+    )
+    p_learn.add_argument("--dry", action="store_true",
+                         help="Read-only: do not write reconciled outcomes or new learnings")
+    p_learn.add_argument("--json", action="store_true",
+                         help="Emit machine-readable JSON instead of the human tables")
+    p_learn.set_defaults(func=cmd_learnings)
+
+    # --- fills ---
+    p_fills = subparsers.add_parser(
+        "fills",
+        help="Void journal records whose orders never filled (keeps calibration honest)",
+        description=(
+            "Reconcile the decision journal against the account's actual fills. "
+            "A record is written at order placement, but a resting maker order "
+            "can be cancelled unfilled (or partially filled) later — leaving a "
+            "phantom prediction that would poison calibration and the Edge "
+            "Policy when the market settles. This voids zero-fill records and "
+            "shrinks partial fills to the executed count. Pass --dry for a "
+            "read-only preview."
+        ),
+    )
+    p_fills.add_argument("--dry", action="store_true",
+                         help="Read-only: report what would change without writing the journal")
+    p_fills.set_defaults(func=cmd_fills)
+
+    # --- edge (prove edge vs. the sharp book — the headline metric) ---
+    p_edge = subparsers.add_parser(
+        "edge",
+        help="Prove (or disprove) edge against the sharp Kalshi book (Brier/log-loss, edge-vs-book, forward-only)",
+        description=(
+            "The edge-measurement harness — the repo's headline feature. Pull "
+            "live settlements, reconcile them into the decision journal IN "
+            "MEMORY (this command writes nothing), then score the settled "
+            "trades: Brier and log-loss calibration, realized edge-vs-book "
+            "attribution (did my fills beat the price the book charged?), the "
+            "calibration curve, and an out-of-sample (forward-only) honesty "
+            "split. Prints an honest, gated verdict that refuses to claim edge "
+            "on thin (n<10) or non-forward data. Read-only. Pass --json for "
+            "machine output."
+        ),
+    )
+    p_edge.add_argument("--json", action="store_true",
+                        help="Emit machine-readable JSON instead of the human table")
+    p_edge.set_defaults(func=cmd_edge)
+
+    # --- report ---
+    p_report = subparsers.add_parser(
+        "report",
+        help="Render the public track record (docs/TRACK_RECORD.md) from persisted data. Offline-capable.",
+        description=(
+            "Render the honest public track-record page from what the loop "
+            "already persists: the settlements corpus, the decision journal, "
+            "and the saved Edge Policy. Losses included, always — the page "
+            "measures edge in public rather than claiming it. The live account "
+            "snapshot is best-effort; without keys the page still renders and "
+            "notes the snapshot's absence. Pass --stdout to print instead of "
+            "writing docs/TRACK_RECORD.md."
+        ),
+    )
+    p_report.add_argument("--stdout", action="store_true",
+                          help="Print the markdown instead of writing docs/TRACK_RECORD.md")
+    p_report.set_defaults(func=cmd_report)
+
+    # --- policy ---
+    p_policy = subparsers.add_parser(
+        "policy",
+        help="Show the data-driven Edge Policy your settled record earns (blocks/warnings/haircuts). Read-only.",
+        description=(
+            "Derive and display the Edge Policy your OWN settled record earns: "
+            "which category/method groups to BLOCK (they lose money over n>=5 "
+            "settled trades), which sides to warn on, and which est_prob bands to "
+            "haircut (you're overconfident there). This is the pre-trade gate that "
+            "closes the self-improvement loop — it never asserts a rule a thin "
+            "(n<5) sample can't support. Reads local files; needs no keys. Pass "
+            "--demo to run against the shipped fixture, --json for machine output."
+        ),
+    )
+    p_policy.add_argument("--demo", action="store_true",
+                          help="Run against the shipped demo fixture (works on a fresh clone)")
+    p_policy.add_argument("--json", action="store_true",
+                          help="Emit machine-readable JSON instead of the human view")
+    p_policy.set_defaults(func=cmd_policy)
+
+    # --- improve ---
+    p_improve = subparsers.add_parser(
+        "improve",
+        help="Run the self-improvement loop: settle → reconcile → re-derive the Edge Policy → persist the gate",
+        description=(
+            "The visible heartbeat of the learning system. Pull Kalshi's "
+            "authoritative settlements, reconcile them into the decision journal, "
+            "re-derive the Edge Policy from the whole settled record, diff it "
+            "against the saved gate to show WHAT the newest settlements changed, "
+            "then save the new policy as the active pre-trade gate. Default writes; "
+            "pass --dry for a full read-only preview. Falls back to the local "
+            "settlements log when the live pull is unavailable (no keys/offline)."
+        ),
+    )
+    p_improve.add_argument("--dry", action="store_true",
+                           help="Read-only preview — record nothing, write no journal or gate")
+    p_improve.add_argument("--json", action="store_true",
+                           help="Emit machine-readable JSON instead of the human view")
+    p_improve.set_defaults(func=cmd_improve)
+
+    # --- verify ---
+    p_verify = subparsers.add_parser(
+        "verify",
+        help="Adversarial-verify a single ticker (research -> skeptic -> verdict). Read-only.",
+        description=(
+            "Run the research/adversarial-verify pipeline on one market: read the "
+            "LIVE orderbook for the executable NO ask we'd fade, research the "
+            "catalyst and true-YES, then a SKEPTIC tries to REFUTE the fade, and "
+            "a deterministic gate recomputes the edge and rules BUY_NO / PASS "
+            "(BUY_NO only when the fade survives AND clears every discipline rule). "
+            "Read-only: never places an order or writes the journal. Pass --json "
+            "for machine output."
+        ),
+    )
+    p_verify.add_argument("--ticker", required=True, help="Kalshi market ticker to verify")
+    p_verify.add_argument("--json", action="store_true", help="Emit the verdict as JSON")
+    p_verify.add_argument(
+        "--research-file",
+        help=(
+            "Path to an operator research JSON ({\"research\": {...}, \"skeptic\": "
+            "{...}} matching RESEARCH_SCHEMA / SKEPTIC_SCHEMA) produced out-of-band "
+            "by a human or agent. Runs the gate with no LLM API key; the edge is "
+            "still recomputed off the live book. Strictly validated — a half-"
+            "filled file fails, it never silently passes."
+        ),
+    )
+    p_verify.add_argument(
+        "--jev",
+        action="store_true",
+        help=(
+            "Floor the skeptic's true-YES at an independent calibrated P(YES) from "
+            "TypeSafe Jev (~typesafe/jev-latest, OpenRouter Decisions API) given the "
+            "researched facts (optional 'facts' list in the research file). Stricter only."
+        ),
+    )
+    p_verify.set_defaults(func=cmd_verify)
 
     # --- scores ---
     p_scores = subparsers.add_parser(
