@@ -53,9 +53,20 @@ def _account_section(equity: Optional[Dict[str, Any]]) -> List[str]:
         f"| Cash | ${float(equity.get('cash', 0)):,.2f} |",
         f"| Open positions | {len(equity.get('positions') or [])} |",
     ]
+    rebase = equity.get("rebase")
+    if rebase:
+        # The governor's peak was re-baselined, so its drawdown restarts near 0.
+        # Publish the all-time figure too — the page must never hide a drawdown.
+        peak = rebase["prior_peak_cents"] / 100
+        all_time = (peak - float(equity.get("equity", 0))) / peak * 100
+        lines.append(f"| Drawdown from all-time peak (${peak:,.2f}) | {all_time:.1f}% |")
     if gov:
+        dd_label = (
+            f"Drawdown since governor re-baseline ({rebase['date']})" if rebase
+            else "Drawdown from peak"
+        )
         lines += [
-            f"| Drawdown from peak | {gov.get('drawdown_pct', 0)}% |",
+            f"| {dd_label} | {gov.get('drawdown_pct', 0)}% |",
             f"| Day P&L | {_money(gov.get('daily_pnl_cents', 0) / 100)} |",
             f"| Governor halted | {'YES' if gov.get('halted') else 'no'} |",
         ]

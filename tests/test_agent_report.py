@@ -127,6 +127,17 @@ def test_account_snapshot_and_governor_render():
     assert "| Governor halted | no |" in md
 
 
+def test_rebased_governor_still_publishes_all_time_drawdown():
+    # After the governor peak is re-baselined, its drawdown restarts near 0 —
+    # the public page must still show the drawdown from the all-time peak.
+    eq = _equity()
+    eq["rebase"] = {"date": "2026-09-25", "prior_peak_cents": 297525}
+    md = _render(equity=eq)
+    assert "| Drawdown from all-time peak ($2,975.25) | 38.7% |" in md
+    assert "| Drawdown since governor re-baseline (2026-09-25) | 0.0% |" in md
+    assert "| Drawdown from peak |" not in md
+
+
 def test_account_section_flags_blended_operator_plus_strategy():
     # The account equity blends the operator's manual trades with the strategy;
     # the page must say so, so a manual-driven drawdown is never misread as the

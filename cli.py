@@ -843,6 +843,19 @@ def cmd_report(args: argparse.Namespace) -> None:
     except Exception:
         pass  # offline render is a supported mode, not an error
 
+    # A governor peak re-baseline must not hide the all-time drawdown publicly.
+    audit = Path("data/runtime/governor_audit.jsonl")
+    if equity and audit.exists():
+        import json
+
+        rebases = [json.loads(l) for l in audit.read_text().splitlines() if l.strip()]
+        rebases = [r for r in rebases if r.get("action") == "rebase_peak"]
+        if rebases:
+            equity["rebase"] = {
+                "date": rebases[-1]["new"]["date"],
+                "prior_peak_cents": max(r["old"]["peak_equity_cents"] for r in rebases),
+            }
+
     md = render_track_record(
         date=_date.today().isoformat(),
         equity=equity,
