@@ -117,6 +117,7 @@ async def place_guarded_order(
     journal_path: Optional[str] = None,
     policy_path: Optional[str] = None,
     override_policy: bool = False,
+    expiration_ts: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Place ONE order through the full guard stack, journaling the prediction.
 
@@ -209,6 +210,8 @@ async def place_guarded_order(
         kwargs = {"ticker": ticker, "client_order_id": coid, "side": side,
                   "action": "buy", "count": n, "type_": type_}
         kwargs["no_price" if side == "no" else "yes_price"] = price_cents
+        if expiration_ts is not None:
+            kwargs["expiration_ts"] = expiration_ts  # resting quotes must not go stale
         resp = await kalshi_client.place_order(**kwargs)
         order = resp.get("order", resp) if isinstance(resp, dict) else {}
         result = {

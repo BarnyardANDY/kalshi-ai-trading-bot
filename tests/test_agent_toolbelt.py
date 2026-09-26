@@ -177,3 +177,23 @@ def test_override_lets_an_edge_erasing_haircut_through(tmp_path):
         governor=_Governor(), dry=True, policy_path=policy_path, override_policy=True))
     assert res["ok"] is True
     assert res["edge"] < 0  # -EV, but the agent explicitly overrode
+
+
+def test_resting_order_expiry_is_passed_to_the_exchange(tmp_path):
+    # Resting-bid nets must expire so stale quotes can't be picked off.
+    client = _MarketClient(no_ask=0.95)
+    res = asyncio.run(place_guarded_order(
+        client, ticker="KXX-1", side="no", count=2, price=0.88, est_prob=0.95,
+        governor=_Governor(), dry=False, journal_path=str(tmp_path / "j.jsonl"),
+        policy_path=str(tmp_path / "none.json"), expiration_ts=1790500000))
+    assert res["ok"] is True
+    assert client.placed[0]["expiration_ts"] == 1790500000
+
+
+def test_no_expiry_by_default(tmp_path):
+    client = _MarketClient(no_ask=0.95)
+    asyncio.run(place_guarded_order(
+        client, ticker="KXX-1", side="no", count=2, price=0.88, est_prob=0.95,
+        governor=_Governor(), dry=False, journal_path=str(tmp_path / "j.jsonl"),
+        policy_path=str(tmp_path / "none.json")))
+    assert "expiration_ts" not in client.placed[0]

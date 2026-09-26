@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -257,6 +258,7 @@ def cmd_trade(args: argparse.Namespace) -> None:
                 est_prob=args.est_prob, category=args.category or "",
                 max_position_pct=args.max_pct, dry=not args.live,
                 override_policy=getattr(args, "override_policy", False),
+                expiration_ts=(int(time.time()) + args.expires_min * 60) if getattr(args, "expires_min", None) else None,
             )
             print(json.dumps(res, indent=2))
         finally:
@@ -1646,6 +1648,10 @@ def build_parser() -> argparse.ArgumentParser:
             "the current bid, and journal it. Allowed even when the governor is "
             "halted (selling reduces risk). Defaults to dry-run; pass --live."
         ),
+    )
+    p_trade.add_argument(
+        "--expires-min", type=int, default=None,
+        help="Expire a resting limit order after N minutes (resting-bid nets must not go stale)",
     )
     p_close.add_argument("--ticker", required=True, help="Market ticker to close")
     p_close.add_argument("--count", type=int, default=None,
