@@ -134,3 +134,76 @@ def with_jev_floor(
         return out
 
     return wrapped
+
+
+# ---------------------------------------------------------------------------
+# Batch text -> rule classification (where Jev measurably earns its keep)
+# ---------------------------------------------------------------------------
+# Measured 2026-09-26: endorsement posts 206/207, word-form mention rules 92/107,
+# ~50k text x rule pairs/min. Use it to FILTER large text volumes, then confirm
+# hits yourself. Never ask it to count or compare numbers.
+
+def build_classify_request(
+    rule: str, texts: List[str], context: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """One Decisions request asking, per text, "does this satisfy the rule?". PURE."""
+    state: Dict[str, Any] = {"market_rule": rule}
+    if context:
+        state["context"] = context
+    return {
+        "model": JEV_MODEL,
+        "state": state,
+        "questions": {
+            f"q{i}": {
+                "type": "noul",
+                "instructions": f'Text: """{t[:3000]}"""\nDoes THIS text satisfy the market rule for YES?',
+                "criteria": {"true": "Satisfies the rule", "false": "Does not"},
+            }
+            for i, t in enumerate(texts)
+        },
+    }
+
+
+def parse_classify(resp: Dict[str, Any], n: int) -> List[float]:
+    """P(satisfies) per text from a classify response. PURE; raises on malformed."""
+    try:
+        return [float(resp["answers"][f"q{i}"]["noul"]) for i in range(n)]
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError(f"malformed Jev classify response: {str(resp)[:300]}") from e
+
+
+async def classify_texts(
+    rule: str,
+    texts: List[str],
+    context: Optional[Dict[str, Any]] = None,
+    batch: int = 20,
+    concurrency: int = 8,
+    api_key: Optional[str] = None,
+) -> List[Optional[float]]:
+    """Classify many texts against one rule; returns P per text (None if a batch failed)."""
+    import asyncio
+
+    import httpx
+
+    key = api_key or os.getenv("OPENROUTER_API_KEY")
+    if not key:
+        raise RuntimeError("OPENROUTER_API_KEY not set — Jev unavailable")
+    out: List[Optional[float]] = [None] * len(texts)
+    sem = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(timeout=120) as http:
+        async def run(start: int) -> None:
+            chunk = texts[start:start + batch]
+            async with sem:
+                for _ in range(3):
+                    try:
+                        r = await http.post(
+                            DECISIONS_URL,
+                            headers={"Authorization": f"Bearer {key}"},
+                            json=build_classify_request(rule, chunk, context),
+                        )
+                        out[start:start + len(chunk)] = parse_classify(r.json(), len(chunk))
+                        return
+                    except (httpx.HTTPError, ValueError):
+                        continue
+        await asyncio.gather(*(run(i) for i in range(0, len(texts), batch)))
+    return out

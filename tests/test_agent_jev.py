@@ -67,3 +67,20 @@ def test_jev_lower_than_skeptic_never_loosens():
     base = aggregate_verdict({"ticker": "T", "no_ask": 0.90}, RESEARCH, SKEPTIC)
     assert verdict["true_yes"] == 3.0 and verdict["edge_pts"] == base["edge_pts"]
     assert verdict["recommend"] == "BUY_NO"
+
+
+def test_classify_request_one_noul_question_per_text():
+    from src.agent.jev import build_classify_request
+    req = build_classify_request("Trump says 'tariff'", ["big tariffs", "trade deals"], {"window": "Sep"})
+    assert req["state"] == {"market_rule": "Trump says 'tariff'", "context": {"window": "Sep"}}
+    assert list(req["questions"]) == ["q0", "q1"]
+    assert all(q["type"] == "noul" for q in req["questions"].values())
+    assert "big tariffs" in req["questions"]["q0"]["instructions"]
+
+
+def test_parse_classify_orders_by_question_and_fails_loudly():
+    from src.agent.jev import parse_classify
+    resp = {"answers": {"q0": {"noul": 0.91}, "q1": {"noul": 0.03}}}
+    assert parse_classify(resp, 2) == [0.91, 0.03]
+    with pytest.raises(ValueError):
+        parse_classify({"answers": {"q0": {"noul": 0.9}}}, 2)

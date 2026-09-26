@@ -60,3 +60,18 @@ def test_no_client_order_id_omitted_when_absent():
     p = build_order_v2_payload("MKT", "", side="yes", action="buy",
                                count=1, type_="market", yes_price=50)
     assert "client_order_id" not in p
+
+
+def test_cancel_order_uses_v2_events_endpoint():
+    # DELETE /portfolio/orders/{id} returns HTTP 410 (deprecated v1); the live
+    # cancel is DELETE /portfolio/events/orders/{id} (verified 2026-09-26).
+    import asyncio
+    from unittest.mock import AsyncMock
+    from src.clients.kalshi_client import KalshiClient
+
+    client = KalshiClient.__new__(KalshiClient)
+    client._make_authenticated_request = AsyncMock(return_value={"order_id": "abc", "reduced_by": "4.00"})
+    asyncio.run(client.cancel_order("abc"))
+    client._make_authenticated_request.assert_awaited_once_with(
+        "DELETE", "/trade-api/v2/portfolio/events/orders/abc"
+    )

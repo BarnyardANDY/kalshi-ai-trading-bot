@@ -442,9 +442,9 @@ class KalshiClient(TradingLoggerMixin):
         return resp
     
     async def cancel_order(self, order_id: str) -> Dict[str, Any]:
-        """Cancel an order."""
+        """Cancel an order (v2; the v1 /portfolio/orders/{id} path returns HTTP 410)."""
         return await self._make_authenticated_request(
-            "DELETE", f"/trade-api/v2/portfolio/orders/{order_id}"
+            "DELETE", f"/trade-api/v2/portfolio/events/orders/{order_id}"
         )
     
     async def get_trades(

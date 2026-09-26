@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **TypeSafe Jev support** (`~typesafe/jev-latest`, OpenRouter Decisions API) — measured, not
+  hyped: see **[docs/JEV.md](docs/JEV.md)**. `cli verify --jev` floors the skeptic's
+  true-YES at Jev's independent P(YES) (stricter-only); `src/agent/jev.py` +
+  `scripts/jev_classify.py` batch-classify text against a market rule (~50k pairs/min,
+  206/207 on endorsement posts); `scripts/jev_backtest.py` reproduces the blind test
+  where Jev lost to the book (Brier 0.209 vs 0.157, n=601).
+- **`cli report` shows all-time drawdown** after a governor peak re-baseline (read from
+  `data/runtime/governor_audit.jsonl`), so a reset never hides a drawdown publicly.
+
+### Fixed
+- **`KalshiClient.cancel_order`** used the deprecated v1 path (HTTP 410); it now calls
+  `DELETE /trade-api/v2/portfolio/events/orders/{id}`.
+
+### Added (earlier this cycle)
 - **`cli verify --research-file`** — run the adversarial-verify gate with **no LLM
   API key**: supply the research + skeptic judgments as JSON (a human or agent does
   them out-of-band), and the deterministic gate still recomputes the edge off the
