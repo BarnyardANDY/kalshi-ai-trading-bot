@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -31,6 +32,17 @@ from src.niche_research import build_research_context, parse_rt_market, rotten_t
 from src.niches import market_display_title
 
 Prediction = Tuple[float, float]  # (probability, confidence)
+
+# event -> (timestamp, liked, not_liked, thresholds, probs, confidence)
+_LADDER_CACHE: Dict[str, tuple] = {}
+
+
+def rt_reprice_minutes() -> float:
+    """Re-ask the AI about a film at most this often unless its reviews change."""
+    try:
+        return max(0.0, float(os.getenv("RT_REPRICE_MINUTES", "60")))
+    except ValueError:
+        return 60.0
 
 
 def rt_min_reviews() -> int:
@@ -163,6 +175,19 @@ async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict
             continue
 
         thresholds = [t for t, _ in rungs]
+        cached = _LADDER_CACHE.get(event)
+        if (
+            cached
+            and cached[1] == liked
+            and cached[2] == not_liked
+            and set(thresholds) <= set(cached[4])
+            and time.time() - cached[0] < rt_reprice_minutes() * 60
+        ):
+            # Same reviews as last time: reuse the view instead of paying for
+            # another AI call every cycle.
+            for t, mk in rungs:
+                out[mk.market_id] = (cached[4][t], cached[5])
+            continue
         base = baseline_probs(liked, not_liked, thresholds)
         prices = {t: mk.yes_price for t, mk in rungs}
         research = await build_research_context("rotten_tomatoes", sample)
@@ -206,6 +231,7 @@ async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict
             + ", ".join(f">{t}: {probs[t]:.0%}" for t in thresholds)
             + f" (confidence {conf:.0%})"
         )
+        _LADDER_CACHE[event] = (time.time(), liked, not_liked, thresholds, probs, conf)
         for t, mk in rungs:
             out[mk.market_id] = (probs[t], conf)
     return out

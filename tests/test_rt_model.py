@@ -69,6 +69,7 @@ def test_waits_for_reviews(monkeypatch):
 
 
 def test_one_ai_call_per_film_and_coherent(monkeypatch):
+    M._LADDER_CACHE.clear()
     _patch_rt(monkeypatch, 30, 20)
     calls = []
     class AI:
@@ -86,6 +87,7 @@ def test_one_ai_call_per_film_and_coherent(monkeypatch):
 
 
 def test_falls_back_to_baseline_when_ai_fails(monkeypatch):
+    M._LADDER_CACHE.clear()
     _patch_rt(monkeypatch, 40, 10)
     class AI:
         async def get_completion(self, *a, **k):
@@ -94,3 +96,21 @@ def test_falls_back_to_baseline_when_ai_fails(monkeypatch):
     assert set(out) == {"KXRT-DIG-70", "KXRT-DIG-90"}
     assert out["KXRT-DIG-70"][0] > out["KXRT-DIG-90"][0]
     assert out["KXRT-DIG-70"][1] == 0.5
+
+
+def test_reuses_view_until_reviews_change(monkeypatch):
+    M._LADDER_CACHE.clear()
+    calls = []
+    class AI:
+        async def get_completion(self, *a, **k):
+            calls.append(1)
+            return '{"probabilities": {"45": 0.9, "70": 0.4}, "confidence": 0.7}'
+    ms = [_mk(45, .79), _mk(70, .06)]
+    _patch_rt(monkeypatch, 30, 20)
+    asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
+    R._cache.clear()
+    asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
+    assert len(calls) == 1            # same reviews -> cached
+    _patch_rt(monkeypatch, 31, 20)    # a new review lands
+    asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
+    assert len(calls) == 2
