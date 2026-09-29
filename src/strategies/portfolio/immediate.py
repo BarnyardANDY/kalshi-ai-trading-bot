@@ -40,6 +40,12 @@ async def create_market_opportunities_from_markets(
     _enabled = enabled_niches()
     rt_predictions = {}
     rt_markets = []
+    if _enabled:
+        try:
+            from src.learning import settle_predictions
+            await settle_predictions(kalshi_client, logger)
+        except Exception as e:
+            logger.warning(f"Learning settle step failed: {e}")
     if any(n.name == "rotten_tomatoes" for n in _enabled):
         from src.rt_model import predict_rt_ladders, threshold_of
         rt_markets = [
@@ -106,6 +112,38 @@ async def create_market_opportunities_from_markets(
             if predicted_prob is None or confidence is None:
                 logger.warning(f"AI analysis failed for {market.market_id}, skipping")
                 continue
+
+            # Self-improvement loop: record every niche prediction, then apply
+            # what past settled predictions taught (trust weight / auto-pause).
+            _mn = niche_for_ticker(market.market_id, _enabled) if _enabled else None
+            if _mn:
+                try:
+                    from src import learning
+                    from src.rt_model import event_of, threshold_of, _LADDER_CACHE
+                    _event = market_info.get("event_ticker") or event_of(market.market_id)
+                    _thr = threshold_of(market.market_id, market.title) if _mn.name == "rotten_tomatoes" else None
+                    _rt = _LADDER_CACHE.get(event_of(market.market_id)) if _thr is not None else None
+                    learning.record_prediction(
+                        market.market_id, _event, _mn.name, predicted_prob, market_prob,
+                        confidence, market_info.get("close_time"), _thr,
+                        _rt[1] if _rt else None, _rt[2] if _rt else None,
+                    )
+                    _lp = learning.niche_params(_mn.name)
+                    raw = predicted_prob
+                    predicted_prob = learning.apply(_mn.name, predicted_prob, market_prob)
+                    if abs(raw - predicted_prob) > 0.005:
+                        logger.info(
+                            f"🧠 {market.market_id}: estimate {raw:.0%} -> {predicted_prob:.0%} "
+                            f"(trust {_lp['trust']:.0%} from {_lp.get('events', 0)} settled events)"
+                        )
+                    if _lp.get("paused"):
+                        logger.info(
+                            f"🧠 {_mn.name} paused: its settled record isn't beating the market "
+                            f"(shadow mode, still learning). Skipping {market.market_id}"
+                        )
+                        continue
+                except Exception as e:
+                    logger.warning(f"Learning step failed for {market.market_id}: {e}")
             
             # Calculate metrics
             edge = predicted_prob - market_prob

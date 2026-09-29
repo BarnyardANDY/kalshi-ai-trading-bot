@@ -73,6 +73,7 @@ def baseline_probs(
     extra_reviews: Optional[int] = None,
     samples: int = 20000,
     seed: int = 7,
+    shift: float = 0.0,
 ) -> Dict[int, float]:
     """P(final Tomatometer > t) for each t, from the current fresh/rotten split.
 
@@ -85,7 +86,7 @@ def baseline_probs(
     rng = np.random.default_rng(seed)
     p = rng.beta(liked + 1, not_liked + 1, size=samples)
     future_fresh = rng.binomial(m, p) if m > 0 else np.zeros(samples)
-    final = np.rint(100 * (liked + future_fresh) / max(1, n + m))
+    final = np.rint(np.clip(100 * (liked + future_fresh) / max(1, n + m) + shift, 0, 100))
     return {int(t): float(np.mean(final > t)) for t in thresholds}
 
 
@@ -188,7 +189,19 @@ async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict
             for t, mk in rungs:
                 out[mk.market_id] = (cached[4][t], cached[5])
             continue
-        base = baseline_probs(liked, not_liked, thresholds)
+        drift = None
+        try:
+            from src.learning import niche_params
+            drift = niche_params("rotten_tomatoes").get("rt_drift")
+        except Exception:
+            pass
+        base = baseline_probs(liked, not_liked, thresholds, shift=drift or 0.0)
+        drift_note = (
+            f"\n        LEARNED FROM PAST RESULTS: films in this bot's record ended on average "
+            f"{drift:+.1f} points from their score at prediction time; the baseline "
+            f"already includes this shift."
+            if drift else ""
+        )
         prices = {t: mk.yes_price for t, mk in rungs}
         research = await build_research_context("rotten_tomatoes", sample)
         ladder_lines = "\n".join(
@@ -206,7 +219,7 @@ async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict
         rotten split and assumes about as many more reviews arrive before
         resolution. It ignores who has/hasn't reviewed yet and the common
         tendency for scores to slip as more (often less enthusiastic) critics
-        weigh in.
+        weigh in.{drift_note}
 
         FRESH RESEARCH:
         {research}

@@ -1401,6 +1401,56 @@ def cmd_niche_scan(args: argparse.Namespace) -> None:
     asyncio.run(_run())
 
 
+def cmd_learning(args: argparse.Namespace) -> None:
+    """Show what the bot has learned from its settled niche predictions."""
+    from src import learning
+
+    if args.settle:
+        from src.clients.kalshi_client import KalshiClient
+
+        async def _settle():
+            client = KalshiClient()
+            try:
+                return await learning.settle_predictions(client, force=True, max_markets=1000)
+            finally:
+                await client.close()
+        n = asyncio.run(_settle())
+        print(f"Checked Kalshi for results: {n} markets newly settled.\n")
+
+    params = learning.current_params(max_age=0)
+    pending = learning.pending_count()
+    print("=" * 70)
+    print("  WHAT THE BOT HAS LEARNED")
+    print("=" * 70)
+    niches = sorted(set(params) | set(pending))
+    if not niches:
+        print("  No niche predictions recorded yet. They start with the next bot cycle.")
+        return
+    need = learning._min_events()
+    for n in niches:
+        p = params.get(n, {})
+        print(f"\n  {n}")
+        print(f"    settled: {p.get('events', 0)} events ({p.get('markets', 0)} markets); "
+              f"waiting on results: {pending.get(n, 0)} markets")
+        if not p:
+            continue
+        print(f"    accuracy (Brier, lower is better): bot {p['brier_ours']:.3f} vs market {p['brier_market']:.3f}")
+        print(f"    log-loss (lower is better):        bot {p['logloss_ours']:.3f} vs market {p['logloss_market']:.3f}")
+        if p.get("learned"):
+            print(f"    trust in bot vs market: {p['trust']:.0%} (learned)")
+        else:
+            print(f"    trust in bot vs market: {p['trust']:.0%} (default; learns after {need} settled events)")
+        if p.get("paused"):
+            print("    STATUS: PAUSED - record isn't beating the market; predicting in shadow mode")
+        else:
+            print("    status: trading")
+        if n == "rotten_tomatoes":
+            d = p.get("rt_drift")
+            print(f"    score drift after prediction: {d:+.1f} pts" if d is not None
+                  else "    score drift after prediction: not enough films yet")
+    print()
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -1923,6 +1973,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_ns.add_argument("--limit", type=int, default=15, help="Markets to list per niche")
     p_ns.add_argument("--research", type=int, default=2, help="Markets per niche to show research for")
     p_ns.set_defaults(func=cmd_niche_scan)
+
+    # --- learning ---
+    p_learn2 = subparsers.add_parser(
+        "learning",
+        help="Show what the bot has learned from settled niche predictions",
+        description="Report accuracy vs the market, learned trust weight, auto-pause state and Rotten Tomatoes score drift.",
+    )
+    p_learn2.add_argument("--settle", action="store_true", help="Check Kalshi for new results first")
+    p_learn2.set_defaults(func=cmd_learning)
 
     # --- health ---
     p_health = subparsers.add_parser(
