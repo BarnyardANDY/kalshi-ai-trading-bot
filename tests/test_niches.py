@@ -147,3 +147,19 @@ def test_ingest_keeps_outcome_and_niche(monkeypatch):
     assert mk.title == "Verity Rotten Tomatoes score? — Above 85"
     assert mk.category == "rotten_tomatoes"
     assert q.qsize() == 1  # volume 62 passes the niche floor (20), not the global 100
+
+
+def test_fetch_stops_on_short_page_even_with_cursor():
+    calls = []
+
+    class FakeClient:
+        async def _make_authenticated_request(self, *a, **k):
+            return {"series": []}
+
+        async def get_markets(self, **k):
+            calls.append(k["series_ticker"])
+            return {"markets": [{"ticker": "KXRT-VER-90", "status": "active"}], "cursor": "always-more"}
+
+    N._SERIES_CACHE.clear()
+    out = asyncio.run(N.fetch_niche_markets(FakeClient(), [N.NICHES["rotten_tomatoes"]]))
+    assert calls == ["KXRT"] and len(out) == 1 and out[0]["_niche"] == "rotten_tomatoes"

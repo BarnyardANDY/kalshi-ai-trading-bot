@@ -42,9 +42,11 @@ NICHES: Dict[str, Niche] = {
     "rotten_tomatoes": Niche(
         name="rotten_tomatoes",
         label="Rotten Tomatoes scores",
+        # All current RT markets live in the single KXRT series; the ~130
+        # older per-film series (KXRTSMURFS, RTWICKED, ...) are closed, and
+        # polling each one every cycle made ingestion slow.
         series=("KXRT",),
         prefixes=("KXRT",),
-        discovery=({"tags": "Rotten Tomatoes"},),
     ),
     "trump_mentions": Niche(
         name="trump_mentions",
@@ -165,7 +167,8 @@ async def fetch_niche_markets(kalshi_client, niches: List[Niche], logger=None) -
                     if logger:
                         logger.warning(f"Failed to fetch markets for series {series}: {e}")
                     break
-                for m in resp.get("markets", []) or []:
+                page = resp.get("markets", []) or []
+                for m in page:
                     t = m.get("ticker")
                     if not t or t in seen:
                         continue
@@ -175,7 +178,8 @@ async def fetch_niche_markets(kalshi_client, niches: List[Niche], logger=None) -
                     m["_niche"] = niche.name
                     markets.append(m)
                 cursor = resp.get("cursor")
-                if not cursor:
+                # Kalshi can hand back a cursor on the last page; stop on a short page.
+                if not cursor or len(page) < 200:
                     break
         if logger:
             count = sum(1 for m in markets if m.get("_niche") == niche.name)
