@@ -34,12 +34,37 @@ async def create_market_opportunities_from_markets(
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
     
+    # Rotten Tomatoes ladders are priced once per film (see src/rt_model.py),
+    # so they don't count against the per-market AI cap below.
+    from src.niches import enabled_niches, niche_for_ticker
+    _enabled = enabled_niches()
+    rt_predictions = {}
+    rt_markets = []
+    if any(n.name == "rotten_tomatoes" for n in _enabled):
+        from src.rt_model import predict_rt_ladders, threshold_of
+        rt_markets = [
+            m for m in markets
+            if (niche_for_ticker(m.market_id, _enabled) or None) is not None
+            and niche_for_ticker(m.market_id, _enabled).name == "rotten_tomatoes"
+            and threshold_of(m.market_id, m.title) is not None
+        ]
+        if rt_markets:
+            rt_predictions = await predict_rt_ladders(rt_markets, xai_client, kalshi_client, logger)
+        rt_ids = {m.market_id for m in rt_markets}
+        markets = [m for m in markets if m.market_id not in rt_ids]
+        # Only rungs of films that passed the review minimum go forward.
+        rt_markets = sorted(
+            (m for m in rt_markets if m.market_id in rt_predictions),
+            key=lambda m: m.volume, reverse=True,
+        )[:40]
+
     # Limit markets to prevent excessive AI costs and focus on best opportunities
     max_markets_to_analyze = 10  # REDUCED: More selective (was 20, now 10) to focus on highest quality
     if len(markets) > max_markets_to_analyze:
         # Sort by volume and take top markets
         markets = sorted(markets, key=lambda m: m.volume, reverse=True)[:max_markets_to_analyze]
         logger.info(f"Limited to top {max_markets_to_analyze} markets by volume for AI analysis")
+    markets = list(markets) + rt_markets
     
     for market in markets:
         try:
@@ -60,20 +85,22 @@ async def create_market_opportunities_from_markets(
             if market_prob < 0.05 or market_prob > 0.95:
                 continue
             
-            # Niche markets get fresh research (RT scores, news) in the prompt
-            research = ""
-            from src.niches import enabled_niches, niche_for_ticker
-            _niches = enabled_niches()
-            _niche = niche_for_ticker(market.market_id, _niches) if _niches else None
-            if _niche:
-                from src.niche_research import build_research_context
-                research = await build_research_context(_niche.name, market_info)
-                logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
+            if market.market_id in rt_predictions:
+                # Already priced as part of its film's ladder.
+                predicted_prob, confidence = rt_predictions[market.market_id]
+            else:
+                # Niche markets get fresh research (RT scores, news) in the prompt
+                research = ""
+                _niche = niche_for_ticker(market.market_id, _enabled) if _enabled else None
+                if _niche:
+                    from src.niche_research import build_research_context
+                    research = await build_research_context(_niche.name, market_info)
+                    logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
 
-            # Get REAL AI prediction using fast analysis
-            predicted_prob, confidence = await _get_fast_ai_prediction(
-                market, xai_client, market_prob, research
-            )
+                # Get REAL AI prediction using fast analysis
+                predicted_prob, confidence = await _get_fast_ai_prediction(
+                    market, xai_client, market_prob, research
+                )
             
             # If AI analysis failed, skip this market
             if predicted_prob is None or confidence is None:
