@@ -175,6 +175,17 @@ async def place_sell_limit_order(
         True if order placed successfully, False otherwise
     """
     logger = get_trading_logger("sell_limit_order")
+
+    # Paper positions are stored with live=1 once "executed", so exit logic
+    # (stop-loss / take-profit / profit-taking) reaches here in paper mode
+    # too. Never send a real order unless live trading is actually enabled.
+    from src.config.settings import settings as _settings
+    if not getattr(_settings.trading, "live_trading_enabled", False):
+        logger.info(
+            f"📝 PAPER SELL SIMULATED: {position.quantity} {position.side} of "
+            f"{position.market_id} at {limit_price:.2f} - no real order sent"
+        )
+        return True
     
     try:
         import uuid
