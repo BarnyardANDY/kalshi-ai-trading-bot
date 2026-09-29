@@ -489,10 +489,12 @@ class UnifiedAdvancedTradingSystem:
                     market_info = market_data.get('market', {})
                     
                     # Get price for the intended side (already determined above)
-                    if intended_side == "YES":
-                        price = market_info.get('yes_price', 50) / 100
-                    else:
-                        price = market_info.get('no_price', 50) / 100
+                    from src.utils.market_prices import get_mid_prices
+                    _yes_px, _no_px = get_mid_prices(market_info)
+                    price = _yes_px if intended_side == "YES" else _no_px
+                    if price <= 0:
+                        self.logger.warning(f"No live price for {market_id}, skipping")
+                        continue
                     
                     # Calculate quantity
                     quantity = max(1, int(position_value / price))

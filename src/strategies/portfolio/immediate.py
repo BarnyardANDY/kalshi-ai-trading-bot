@@ -50,7 +50,11 @@ async def create_market_opportunities_from_markets(
             
             # FIXED: Extract from nested 'market' object (same fix as immediate trading)
             market_info = market_data.get('market', {})
-            market_prob = market_info.get('yes_price', 50) / 100
+            from src.utils.market_prices import get_mid_prices
+            market_prob, _ = get_mid_prices(market_info)
+            if market_prob <= 0:
+                logger.warning(f"No live price for {market.market_id}, skipping")
+                continue
             
             # Skip markets with extreme prices (too risky for portfolio)
             if market_prob < 0.05 or market_prob > 0.95:

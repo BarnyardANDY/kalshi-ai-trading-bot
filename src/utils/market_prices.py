@@ -67,3 +67,50 @@ def get_market_prices(market_info: Dict[str, Any]) -> Tuple[float, float, float,
         no_ask  = (market_info.get("no_ask",  0) or 0) / 100
 
     return yes_bid, yes_ask, no_bid, no_ask
+
+
+def _side_mid(bid: float, ask: float) -> float:
+    """Midpoint of a bid/ask pair, falling back to whichever side is quoted."""
+    if bid > 0 and ask > 0:
+        return (bid + ask) / 2
+    return ask or bid or 0.0
+
+
+def get_mid_prices(market_info: Dict[str, Any]) -> Tuple[float, float]:
+    """
+    Return (yes_price, no_price) as dollar floats in [0.0, 1.0].
+
+    Kalshi no longer returns a top-level ``yes_price`` / ``no_price`` field
+    on market objects, so code reading ``market_info.get('yes_price', 50)``
+    silently treated every market as 50¢. This derives each side's price
+    from the live book (bid/ask midpoint), falling back to the last trade
+    price, then to a legacy ``yes_price`` / ``no_price`` in cents.
+
+    Accepts either the bare market dict or the ``{"market": {...}}`` wrapper
+    returned by ``KalshiClient.get_market``. Returns (0.0, 0.0) when no
+    price is available, so callers can skip rather than trade on a guess.
+    """
+    if isinstance(market_info.get("market"), dict):
+        market_info = market_info["market"]
+
+    yes_bid, yes_ask, no_bid, no_ask = get_market_prices(market_info)
+    yes = _side_mid(yes_bid, yes_ask)
+    no = _side_mid(no_bid, no_ask)
+
+    if yes <= 0 and no <= 0:
+        last = market_info.get("last_price_dollars")
+        if last not in (None, ""):
+            yes = float(last)
+        elif market_info.get("last_price"):
+            yes = market_info["last_price"] / 100
+        elif market_info.get("yes_price"):
+            yes = market_info["yes_price"] / 100
+        if market_info.get("no_price") and not yes:
+            no = market_info["no_price"] / 100
+
+    if yes > 0 and no <= 0:
+        no = 1.0 - yes
+    elif no > 0 and yes <= 0:
+        yes = 1.0 - no
+
+    return yes, no

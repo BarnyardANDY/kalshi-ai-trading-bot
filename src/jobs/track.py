@@ -187,8 +187,8 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                     continue
 
                 # Get current prices
-                current_yes_price = market_data.get('yes_price', 0) / 100  # Convert cents to dollars
-                current_no_price = market_data.get('no_price', 0) / 100
+                from src.utils.market_prices import get_mid_prices
+                current_yes_price, current_no_price = get_mid_prices(market_data)
                 market_status = market_data.get('status', 'unknown')
                 market_result = market_data.get('result')  # Market resolution result
                 

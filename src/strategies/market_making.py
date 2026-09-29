@@ -578,7 +578,8 @@ class AdvancedMarketMaker:
             if not market_data:
                 return False
             
-            current_yes_price = market_data.get('yes_price', 0) / 100
+            from src.utils.market_prices import get_mid_prices
+            current_yes_price, _ = get_mid_prices(market_data)
             order_price = order.price / 100
             
             # Update if market has moved significantly

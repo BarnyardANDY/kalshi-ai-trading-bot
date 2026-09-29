@@ -271,10 +271,9 @@ async def place_profit_taking_orders(
                     continue
                 
                 # Get current price based on position side
-                if position.side == "YES":
-                    current_price = market_data.get('yes_price', 0) / 100  # Convert cents to dollars
-                else:
-                    current_price = market_data.get('no_price', 0) / 100
+                from src.utils.market_prices import get_mid_prices
+                _yes_px, _no_px = get_mid_prices(market_data)
+                current_price = _yes_px if position.side == "YES" else _no_px
                 
                 # Calculate current profit
                 if current_price > 0:
@@ -359,10 +358,9 @@ async def place_stop_loss_orders(
                     continue
                 
                 # Get current price based on position side
-                if position.side == "YES":
-                    current_price = market_data.get('yes_price', 0) / 100
-                else:
-                    current_price = market_data.get('no_price', 0) / 100
+                from src.utils.market_prices import get_mid_prices
+                _yes_px, _no_px = get_mid_prices(market_data)
+                current_price = _yes_px if position.side == "YES" else _no_px
                 
                 # Calculate current loss
                 if current_price > 0:
