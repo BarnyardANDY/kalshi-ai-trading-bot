@@ -135,16 +135,17 @@ class TradingConfig:
     min_confidence_threshold: float = 0.45  # DECREASED: Lower confidence threshold (was 0.55, now 0.45)
 
     # Cost control and market analysis frequency - MORE PERMISSIVE
-    daily_ai_budget: float = 10.0  # INCREASED: Higher daily budget (was 5.0, now 10.0)
+    # Soft budget checked before each decision; follows DAILY_AI_COST_LIMIT so both caps agree.
+    daily_ai_budget: float = field(default_factory=lambda: float(os.getenv("DAILY_AI_COST_LIMIT", "2.0")))
     max_ai_cost_per_decision: float = 0.08  # INCREASED: Higher per-decision cost (was 0.05, now 0.08)
     analysis_cooldown_hours: int = 3  # DECREASED: Shorter cooldown (was 6, now 3)
     max_analyses_per_market_per_day: int = 4  # INCREASED: More analyses per day (was 2, now 4)
     
     # Daily AI spending limits - SAFETY CONTROLS
-    # Default is $10/day — conservative limit to prevent runaway API spend.
-    # Raise via DAILY_AI_COST_LIMIT env var or by editing this value directly.
-    # e.g. export DAILY_AI_COST_LIMIT=25  (for more aggressive scanning)
-    daily_ai_cost_limit: float = field(default_factory=lambda: float(os.getenv("DAILY_AI_COST_LIMIT", "10.0")))
+    # Default is $2/day — hard cap on AI spend; the bot pauses AI analysis
+    # until the next calendar day once reached.
+    # Change via DAILY_AI_COST_LIMIT in .env, e.g. DAILY_AI_COST_LIMIT=5
+    daily_ai_cost_limit: float = field(default_factory=lambda: float(os.getenv("DAILY_AI_COST_LIMIT", "2.0")))
     enable_daily_cost_limiting: bool = True  # Enable daily cost limits
     sleep_when_limit_reached: bool = True  # Sleep until next day when limit reached
 
