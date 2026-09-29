@@ -106,11 +106,11 @@ def test_build_context_offline(monkeypatch):
     ctx = asyncio.run(R.build_research_context("rotten_tomatoes", RT_MARKET))
     assert "Resolution rules: If Verity" in ctx
     assert "above 90%" in ctx
-    assert "Could not load a Rotten Tomatoes page" in ctx
+    assert "Could not find a current Rotten Tomatoes page" in ctx
 
 
 def test_build_context_uses_scraped_score(monkeypatch):
-    page = '<title>Verity</title>{"criticsScore":{"likedCount":40,"notLikedCount":10,"reviewCount":50,"score":"80"}}'
+    page = '<title>Verity</title>{"releaseYear":"2026","criticsScore":{"likedCount":40,"notLikedCount":10,"reviewCount":50,"score":"80"}}'
     async def fake_get(url):
         return page if "rottentomatoes.com/m/verity" in url else None
     monkeypatch.setattr(R, "_get", fake_get)
@@ -163,3 +163,23 @@ def test_fetch_stops_on_short_page_even_with_cursor():
     N._SERIES_CACHE.clear()
     out = asyncio.run(N.fetch_niche_markets(FakeClient(), [N.NICHES["rotten_tomatoes"]]))
     assert calls == ["KXRT"] and len(out) == 1 and out[0]["_niche"] == "rotten_tomatoes"
+
+
+def test_rt_prefers_current_year_over_same_name_old_film(monkeypatch):
+    old = '<title>Digger | Rotten Tomatoes</title>{"releaseYear":"1993","criticsScore":{"reviewCount":0}}'
+    new = '<title>Digger | Rotten Tomatoes</title>{"releaseYear":"2026","criticsScore":{"likedCount":30,"notLikedCount":20,"reviewCount":50,"score":"60"}}'
+    async def fake_get(url):
+        if url.endswith("/m/digger"):
+            return old
+        if url.endswith("/m/digger_2026"):
+            return new
+        return None
+    monkeypatch.setattr(R, "_get", fake_get)
+    R._cache.clear()
+    d = asyncio.run(R.rotten_tomatoes_score("Digger", 2026))
+    assert d["url"].endswith("/m/digger_2026") and d["score"] == 60 and d["year"] == 2026
+
+
+def test_rt_year_from_theaters_release_text():
+    page = 'Release Date (Theaters)</dt><dd>Oct 2, 2026, Wide</dd>'
+    assert R.parse_rt_page(page)["year"] == 2026

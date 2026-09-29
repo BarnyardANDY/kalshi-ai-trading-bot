@@ -146,16 +146,16 @@ def parse_rt_market(market: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
-def rt_slug_candidates(name: str) -> List[str]:
+def rt_slug_candidates(name: str, year: Optional[int] = None) -> List[str]:
     """Likely Rotten Tomatoes URL slugs for a title, most likely first."""
     base = name.lower()
     base = base.replace("&", "and")
     base = re.sub(r"[’'`]", "", base)
     base = re.sub(r"[^a-z0-9]+", "_", base).strip("_")
-    year = datetime.now().year
-    cands = [base, f"{base}_{year}", f"{base}_{year + 1}", f"{base}_{year - 1}"]
+    year = year or datetime.now().year
+    cands = [base, f"{base}_{year}", f"{base}_{year - 1}", f"{base}_{year + 1}"]
     if base.startswith("the_"):
-        cands.append(base[4:])
+        cands += [base[4:], f"{base[4:]}_{year}"]
     seen, out = set(), []
     for c in cands:
         if c and c not in seen:
@@ -198,15 +198,43 @@ def parse_rt_page(page: str) -> Dict[str, Any]:
     rel = re.search(r"Release Date \(Theaters\)[^0-9A-Za-z]*(?:<[^>]+>\s*)*([A-Z][a-z]{2} \d{1,2}, \d{4})", page)
     if rel:
         data["release"] = rel.group(1)
+    data["year"] = _release_year(page, data.get("release"))
     return data
 
 
-async def rotten_tomatoes_score(name: str) -> Optional[Dict[str, Any]]:
-    key = f"rt:{name.lower()}"
+def _release_year(page: str, release: Optional[str] = None) -> Optional[int]:
+    """Best guess at the title's release year (used to reject same-name older films)."""
+    if release:
+        m = re.search(r"(\d{4})$", release)
+        if m:
+            return int(m.group(1))
+    for pat in (
+        r'"releaseYear"\s*:\s*"?(\d{4})',
+        r'releaseyear="(\d{4})"',
+        r"Release Date \((?:Theaters|Streaming)\)[\s\S]{0,300}?\b((?:19|20)\d{2})\b",
+        r"<title>[^<]*\(((?:19|20)\d{2})\)",
+        r'"dateCreated"\s*:\s*"((?:19|20)\d{2})',
+    ):
+        y = _first_int(pat, page)
+        if y:
+            return y
+    return None
+
+
+async def rotten_tomatoes_score(name: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    """Scores for the title, preferring the page whose release year matches.
+
+    Plain slugs often belong to an older film of the same name (/m/digger is
+    a 1993 film; the 2026 one is /m/digger_2026), so a page is only accepted
+    outright when its release year is within a year of the market's year.
+    """
+    year = year or datetime.now().year
+    key = f"rt:{name.lower()}:{year}"
     hit = _cached(key)
     if hit is not None:
         return hit or None
-    for slug in rt_slug_candidates(name):
+    fallback = None
+    for slug in rt_slug_candidates(name, year):
         for kind in ("m", "tv"):
             url = f"https://www.rottentomatoes.com/{kind}/{slug}"
             page = await _get(url)
@@ -214,7 +242,15 @@ async def rotten_tomatoes_score(name: str) -> Optional[Dict[str, Any]]:
                 continue
             data = parse_rt_page(page)
             data["url"] = url
-            return _store(key, data)
+            y = data.get("year")
+            if y is not None and abs(y - year) <= 1:
+                return _store(key, data)
+            if y is None and fallback is None:
+                fallback = data  # unknown year: keep as a last resort
+            break  # found a page for this slug; try the next slug variant
+    if fallback:
+        fallback["year_unverified"] = True
+        return _store(key, fallback)
     _store(key, {})
     return None
 
@@ -228,7 +264,11 @@ async def _rt_context(market: Dict[str, Any]) -> str:
     if info.get("threshold") is not None:
         when = f" on {info['date']}" if info.get("date") else ""
         lines.append(f"Resolves YES if the Tomatometer is {info['op']} {info['threshold']}%{when}.")
-    rt = await rotten_tomatoes_score(name)
+    year = None
+    if info.get("date"):
+        m = re.search(r"(\d{4})$", info["date"])
+        year = int(m.group(1)) if m else None
+    rt = await rotten_tomatoes_score(name, year)
     if rt:
         parts = []
         if rt.get("reviews") == 0 or (rt.get("score") is None and not rt.get("reviews")):
@@ -244,9 +284,12 @@ async def _rt_context(market: Dict[str, Any]) -> str:
             parts.append(f"theatrical release {rt['release']}")
         lines.append(f"Rotten Tomatoes right now ({rt.get('url')}): " + "; ".join(parts) + ".")
         if rt.get("page_title"):
-            lines.append(f"(Page title: {rt['page_title']} — check it is the right film.)")
+            yr = f", release year {rt['year']}" if rt.get("year") else ""
+            lines.append(f"(Page: {rt['page_title']}{yr} — check it is the right title.)")
+        if rt.get("year_unverified"):
+            lines.append("WARNING: could not confirm this page is the right year's title; treat with caution.")
     else:
-        lines.append(f"Could not load a Rotten Tomatoes page for '{name}'.")
+        lines.append(f"Could not find a current Rotten Tomatoes page for '{name}'.")
     news = await google_news(f'"{name}" review OR "Rotten Tomatoes"', max_items=6, max_age_days=10)
     lines.append(_fmt_news("Recent headlines", news))
     return "\n".join(lines)
