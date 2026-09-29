@@ -60,9 +60,19 @@ async def create_market_opportunities_from_markets(
             if market_prob < 0.05 or market_prob > 0.95:
                 continue
             
+            # Niche markets get fresh research (RT scores, news) in the prompt
+            research = ""
+            from src.niches import enabled_niches, niche_for_ticker
+            _niches = enabled_niches()
+            _niche = niche_for_ticker(market.market_id, _niches) if _niches else None
+            if _niche:
+                from src.niche_research import build_research_context
+                research = await build_research_context(_niche.name, market_info)
+                logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
+
             # Get REAL AI prediction using fast analysis
             predicted_prob, confidence = await _get_fast_ai_prediction(
-                market, xai_client, market_prob
+                market, xai_client, market_prob, research
             )
             
             # If AI analysis failed, skip this market
@@ -420,19 +430,33 @@ def _calculate_simple_kelly(opportunity: MarketOpportunity) -> float:
 async def _get_fast_ai_prediction(
     market: Market,
     xai_client: XAIClient,
-    market_price: float
+    market_price: float,
+    research: str = "",
 ) -> Tuple[Optional[float], Optional[float]]:
     """
     Get a fast AI prediction for a market without expensive analysis.
     Returns (predicted_probability, confidence) or (None, None) if failed.
     """
     try:
+        research_block = (
+            f"""
+        FRESH RESEARCH (gathered minutes ago; trust this over your training data):
+        {research}
+
+        Estimate the probability from the research and resolution rules
+        yourself, then compare with the price. If the research is thin or
+        inconclusive, keep your estimate near the market price and lower your
+        confidence.
+        """
+            if research else ""
+        )
         # Create a simplified prompt for faster analysis
         prompt = f"""
         QUICK PREDICTION REQUEST
         
         Market: {market.title}
         Current YES price: {market_price:.2f}
+        {research_block}
         
         Provide a FAST prediction in JSON format:
         {{

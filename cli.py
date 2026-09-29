@@ -1362,6 +1362,45 @@ def cmd_close_all(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def cmd_niche_scan(args: argparse.Namespace) -> None:
+    """Read-only: list niche markets and the research the AI would see."""
+    from src.clients.kalshi_client import KalshiClient
+    from src.niches import NICHES, enabled_niches, fetch_niche_markets, market_display_title
+    from src.niche_research import build_research_context
+    from src.utils.market_prices import get_mid_prices
+
+    names = [n.strip() for n in (args.niches or "").split(",") if n.strip()]
+    niches = [NICHES[n] for n in names if n in NICHES] if names else enabled_niches()
+    if not niches:
+        print("No niches selected. Set NICHES in .env or pass --niches "
+              f"(available: {', '.join(NICHES)}).")
+        return
+
+    async def _run():
+        client = KalshiClient()
+        try:
+            markets = await fetch_niche_markets(client, niches)
+        finally:
+            await client.close()
+        for niche in niches:
+            ms = [m for m in markets if m.get("_niche") == niche.name]
+            ms.sort(key=lambda m: float(m.get("volume_fp") or m.get("volume") or 0), reverse=True)
+            print("=" * 78)
+            print(f"{niche.label}: {len(ms)} open markets")
+            print("=" * 78)
+            for m in ms[: args.limit]:
+                yes, _ = get_mid_prices(m)
+                vol = int(float(m.get("volume_fp") or m.get("volume") or 0))
+                print(f"  {yes*100:5.1f}c  vol {vol:>7}  {m['ticker']:<34} {market_display_title(m)[:70]}")
+            for m in ms[: args.research]:
+                print("-" * 78)
+                print(f"Research for {m['ticker']} -- {market_display_title(m)}")
+                print(await build_research_context(niche.name, m))
+            print()
+
+    asyncio.run(_run())
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -1873,6 +1912,17 @@ def build_parser() -> argparse.ArgumentParser:
         description="Backtest trading strategies against historical market data. This feature is under development.",
     )
     p_bt.set_defaults(func=cmd_backtest)
+
+    # --- niche-scan ---
+    p_ns = subparsers.add_parser(
+        "niche-scan",
+        help="List open markets in your niches and the research the AI sees (read-only)",
+        description="Fetch open markets for the niches in NICHES (or --niches) and print the research context for the busiest ones. Places no orders and makes no AI calls.",
+    )
+    p_ns.add_argument("--niches", default="", help="Comma list, e.g. rotten_tomatoes,trump_mentions")
+    p_ns.add_argument("--limit", type=int, default=15, help="Markets to list per niche")
+    p_ns.add_argument("--research", type=int, default=2, help="Markets per niche to show research for")
+    p_ns.set_defaults(func=cmd_niche_scan)
 
     # --- health ---
     p_health = subparsers.add_parser(

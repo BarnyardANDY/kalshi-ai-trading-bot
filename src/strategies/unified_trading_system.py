@@ -249,6 +249,16 @@ class UnifiedAdvancedTradingSystem:
             volume_min=200,  # DECREASED: Much lower volume requirement (was 50,000, now 200) for more opportunities
             max_days_to_expiry=365  # Accept any timeline with dynamic exits
         )
+            from src.niches import enabled_niches, niche_for_ticker, niche_min_volume
+            _niches = enabled_niches()
+            if _niches:
+                niche_pool = await self.db_manager.get_eligible_markets(
+                    volume_min=niche_min_volume(), max_days_to_expiry=365
+                )
+                markets = [m for m in niche_pool if niche_for_ticker(m.market_id, _niches)]
+                self.logger.info(
+                    f"Niche mode ({', '.join(n.name for n in _niches)}): {len(markets)} markets"
+                )
             if not markets:
                 self.logger.warning("No markets available for trading")
                 return TradingSystemResults()

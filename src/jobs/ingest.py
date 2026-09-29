@@ -14,6 +14,7 @@ from src.utils.database import DatabaseManager, Market
 from src.config.settings import settings
 from src.utils.logging_setup import get_trading_logger
 from src.utils.market_prices import is_tradeable_market
+from src.niches import enabled_niches, fetch_niche_markets, market_display_title, niche_min_volume
 
 
 async def process_and_queue_markets(
@@ -72,18 +73,21 @@ async def process_and_queue_markets(
             logger.debug(f"Skipping collection ticker {market_data['ticker']} (YES_ask={yes_ask}, NO_ask={no_ask})")
             continue
 
+        expiry_raw = market_data.get("expiration_time") or market_data.get("close_time")
+        if not expiry_raw:
+            continue
         market = Market(
             market_id=market_data["ticker"],
-            title=market_data["title"],
+            title=market_display_title(market_data),
             yes_price=yes_price,
             no_price=no_price,
             volume=volume,
             expiration_ts=int(
                 datetime.fromisoformat(
-                    market_data["expiration_time"].replace("Z", "+00:00")
+                    expiry_raw.replace("Z", "+00:00")
                 ).timestamp()
             ),
-            category=market_data.get("category", "unknown"),
+            category=market_data.get("_niche") or market_data.get("category", "unknown"),
             status=market_data["status"],
             last_updated=datetime.now(),
             has_position=has_position,
@@ -105,10 +109,11 @@ async def process_and_queue_markets(
         max_bid_ask_spread: float = 0.20   # INCREASED: Allow even wider spreads (was 0.15, now 20¢)
         min_confidence_for_long_term: float = 0.40  # DECREASED: Lower confidence required (was 0.5, now 40%)
 
+        niche_names = {n.name for n in enabled_niches()}
         eligible_markets = [
             m
             for m in markets_to_upsert
-            if m.volume >= min_volume
+            if m.volume >= (niche_min_volume() if m.category in niche_names else min_volume)
             # REMOVED TIME RESTRICTION - we can now trade markets with ANY deadline!
             # Dynamic exit strategies will handle timing automatically
             and (
@@ -163,6 +168,19 @@ async def run_ingestion(
                 )
             else:
                 logger.warning(f"Could not find market with ticker: {market_ticker}")
+        elif enabled_niches():
+            niches = enabled_niches()
+            logger.info(f"Niche mode: fetching only {', '.join(n.name for n in niches)}")
+            niche_markets = await fetch_niche_markets(kalshi_client, niches, logger)
+            if niche_markets:
+                await process_and_queue_markets(
+                    niche_markets,
+                    db_manager,
+                    queue,
+                    existing_position_market_ids,
+                    logger,
+                )
+            logger.info(f"Total niche markets ingested: {len(niche_markets)}")
         else:
             # Primary: fetch via events API (Kalshi migrated all tickers to KXMVE*,
             # so /markets only returns parlay tickers. Real markets live under events.)
