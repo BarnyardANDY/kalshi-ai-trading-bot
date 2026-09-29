@@ -428,6 +428,16 @@ class KalshiClient(TradingLoggerMixin):
         Returns:
             Order response
         """
+        # HARD LOCK: no code path may send a real order unless live trading was
+        # explicitly switched on for this process (cli ... --live). Paper mode
+        # therefore can't reach Kalshi even if some strategy forgets to check.
+        from src.config.settings import settings as _settings
+        if not getattr(_settings.trading, "live_trading_enabled", False):
+            self.logger.error(
+                "BLOCKED real order: live trading is disabled (paper mode)",
+                ticker=ticker, side=side, action=action, count=count,
+            )
+            return {"blocked": True, "error": "live trading disabled"}
         payload = build_order_v2_payload(
             ticker, client_order_id, side, action, count, type_,
             yes_price, no_price, expiration_ts,

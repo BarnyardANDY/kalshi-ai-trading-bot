@@ -42,6 +42,12 @@ def cmd_run(args: argparse.Namespace) -> None:
 
     live_mode = live and not paper
 
+    # The order hard-lock in KalshiClient.place_order follows this flag, so it
+    # must reflect THIS run's mode (an .env LIVE_TRADING_ENABLED=true must not
+    # leak into a --paper run).
+    from src.config import settings as _cfg
+    _cfg.settings.trading.live_trading_enabled = bool(live_mode)
+
     if live_mode:
         print("⚠️  WARNING: LIVE TRADING MODE ENABLED")
         print("   This will use real money and place actual trades.")
@@ -241,6 +247,8 @@ def cmd_brief(args: argparse.Namespace) -> None:
 
 def cmd_trade(args: argparse.Namespace) -> None:
     """Place ONE guarded, journaled order — the agent's hands. Dry by default."""
+    from src.config import settings as _cfg
+    _cfg.settings.trading.live_trading_enabled = bool(getattr(args, 'live', False))
     import json
     from src.utils.logging_setup import setup_logging
 
@@ -269,6 +277,8 @@ def cmd_trade(args: argparse.Namespace) -> None:
 
 def cmd_close(args: argparse.Namespace) -> None:
     """Close (sell) a single position with a marketable limit. Dry by default."""
+    from src.config import settings as _cfg
+    _cfg.settings.trading.live_trading_enabled = bool(getattr(args, 'live', False))
     import json
     from src.utils.logging_setup import setup_logging
 
@@ -1252,6 +1262,8 @@ def cmd_close_all(args: argparse.Namespace) -> None:
 
     auto_yes = getattr(args, "yes", False)
     live_mode = getattr(args, "live", False)
+    from src.config import settings as _cfg
+    _cfg.settings.trading.live_trading_enabled = bool(live_mode)
 
     print("=" * 56)
     print("  CLOSE ALL POSITIONS")
