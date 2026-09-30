@@ -14,6 +14,7 @@ from src.utils.database import DatabaseManager, Market
 from src.clients.kalshi_client import KalshiClient
 from src.clients.xai_client import XAIClient
 from src.config.settings import settings
+from src.runtime_config import get as _rc_get
 from src.utils.logging_setup import get_trading_logger
 from src.utils.market_prices import get_market_prices
 from src.utils.position_sizing import binary_market_payout_odds, kelly_fraction
@@ -34,6 +35,23 @@ async def create_market_opportunities_from_markets(
     logger = get_trading_logger("portfolio_opportunities")
     opportunities = []
     
+    # Live strategy settings (editable from the dashboard; re-read every cycle)
+    from src import runtime_config as _rc
+    _min_px, _max_px = float(_rc.get("MIN_PRICE")), float(_rc.get("MAX_PRICE"))
+    _min_edge, _min_conf = float(_rc.get("MIN_EDGE")), float(_rc.get("MIN_CONFIDENCE"))
+    _paused = _rc.paused()
+    settings.trading.max_position_size_pct = float(_rc.get("MAX_POSITION_PCT"))
+    _ai_cap = float(_rc.get("DAILY_AI_COST_LIMIT"))
+    settings.trading.daily_ai_cost_limit = _ai_cap
+    settings.trading.daily_ai_budget = _ai_cap
+    for _c in (xai_client, getattr(xai_client, "_openrouter_client", None)):
+        _t = getattr(_c, "daily_tracker", None)
+        if _t is not None and getattr(_t, "daily_limit", None) != _ai_cap:
+            _t.daily_limit = _ai_cap
+            _t.is_exhausted = _t.total_cost >= _ai_cap
+    if _paused:
+        logger.info("⏸️  Trading paused from the dashboard: predicting and learning only, no new trades")
+
     # Rotten Tomatoes ladders are priced once per film (see src/rt_model.py),
     # so they don't count against the per-market AI cap below.
     from src.niches import enabled_niches, niche_for_ticker
@@ -108,7 +126,7 @@ async def create_market_opportunities_from_markets(
                 continue
             
             # Skip markets with extreme prices (too risky for portfolio)
-            if market_prob < 0.05 or market_prob > 0.95:
+            if market_prob < _min_px or market_prob > _max_px:
                 continue
             
             if market.market_id in rt_predictions:
@@ -182,6 +200,16 @@ async def create_market_opportunities_from_markets(
             from src.utils.edge_filter import EdgeFilter
             edge_result = EdgeFilter.calculate_edge(predicted_prob, market_prob, confidence)
             
+            if edge_result.passes_filter and (
+                edge_result.edge_percentage < _min_edge or confidence < _min_conf
+            ):
+                logger.info(
+                    f"❌ BELOW YOUR GATES: {market.market_id} - edge {edge_result.edge_percentage:.1%} "
+                    f"(min {_min_edge:.0%}), confidence {confidence:.0%} (min {_min_conf:.0%})"
+                )
+                continue
+            if _paused:
+                continue
             if edge_result.passes_filter:  # Must pass 10% edge filter
                 opportunity = MarketOpportunity(
                     market_id=market.market_id,
@@ -256,8 +284,8 @@ async def _evaluate_immediate_trade(
         # Additional criteria for immediate execution - MORE AGGRESSIVE
         strong_opportunity = (
             should_trade and
-            edge_result.edge_percentage >= 0.10 and  # DECREASED: 10% edge for immediate execution (was 18%)
-            opportunity.confidence >= 0.60 and       # DECREASED: 60% confidence (was 75%)
+            edge_result.edge_percentage >= float(_rc_get("MIN_EDGE")) and   # dashboard: Min edge
+            opportunity.confidence >= float(_rc_get("MIN_CONFIDENCE")) and  # dashboard: Min confidence
             opportunity.expected_return >= 0.05      # DECREASED: 5% expected return (was 8%)
         )
         

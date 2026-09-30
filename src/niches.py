@@ -68,7 +68,8 @@ NICHES: Dict[str, Niche] = {
 
 def enabled_niches() -> List[Niche]:
     """Niches listed in the NICHES env var (unknown names are ignored)."""
-    raw = os.getenv("NICHES", "")
+    from src import runtime_config  # dashboard override > .env > empty (= all markets)
+    raw = runtime_config.get("NICHES", default="")
     names = [n.strip().lower() for n in raw.split(",") if n.strip()]
     return [NICHES[n] for n in names if n in NICHES]
 
@@ -80,7 +81,8 @@ def niche_min_volume() -> int:
     floor would hide most of them.
     """
     try:
-        return int(os.getenv("NICHE_MIN_VOLUME", "20"))
+        from src import runtime_config
+        return int(runtime_config.get("NICHE_MIN_VOLUME"))
     except ValueError:
         return 20
 

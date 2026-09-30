@@ -228,3 +228,4 @@ kalshi_private_key*
 # Self-improvement loop state (per machine)
 data/learning.db
 data/learned_params.json
+data/runtime_config.json

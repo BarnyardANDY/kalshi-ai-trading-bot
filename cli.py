@@ -1029,29 +1029,26 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 
 def cmd_dashboard(args: argparse.Namespace) -> None:
-    """Launch the Streamlit monitoring dashboard."""
+    """Launch the control-panel dashboard (results + live strategy controls)."""
     import subprocess
 
-    # Prefer the dedicated dashboard launch script if it exists.
-    dashboard_script = Path(__file__).parent / "scripts" / "launch_dashboard.py"
-    beast_dashboard = Path(__file__).parent / "scripts" / "beast_mode_dashboard.py"
-
-    if dashboard_script.exists():
-        subprocess.run([sys.executable, str(dashboard_script)], check=False)
-    elif beast_dashboard.exists():
-        # Fall back to running the dashboard module directly.
-        from src.utils.logging_setup import setup_logging
-        from beast_mode_bot import BeastModeBot
-
-        setup_logging(log_level="INFO")
-        bot = BeastModeBot(live_mode=False, dashboard_mode=True)
-        try:
-            asyncio.run(bot.run())
-        except KeyboardInterrupt:
-            print("\nDashboard stopped by user.")
-    else:
-        print("Error: No dashboard script found.")
-        sys.exit(1)
+    root = Path(__file__).parent
+    if getattr(args, "legacy", False):
+        legacy = root / "scripts" / "launch_dashboard.py"
+        subprocess.run([sys.executable, str(legacy)], check=False, cwd=root)
+        return
+    panel = root / "scripts" / "control_panel.py"
+    print("Control panel on http://localhost:8501 (server-local; view it through an SSH tunnel:")
+    print("  ssh -L 8501:localhost:8501 root@<server-ip>   then open http://localhost:8501)")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", str(panel),
+             "--server.address", "localhost", "--server.port", str(getattr(args, "port", 8501)),
+             "--server.headless", "true", "--browser.gatherUsageStats", "false"],
+            check=False, cwd=root,
+        )
+    except KeyboardInterrupt:
+        print("\nDashboard stopped.")
 
 
 def cmd_status(args: argparse.Namespace) -> None:
@@ -1958,6 +1955,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Launch the Streamlit monitoring dashboard",
         description="Open a real-time web dashboard showing portfolio performance, positions, risk metrics, and AI decision logs.",
     )
+    p_dash.add_argument("--legacy", action="store_true", help="Open the original Streamlit dashboard instead")
+    p_dash.add_argument("--port", type=int, default=8501, help="Port to serve on (default 8501)")
     p_dash.set_defaults(func=cmd_dashboard)
 
     # --- status ---

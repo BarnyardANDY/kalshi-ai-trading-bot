@@ -29,3 +29,14 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip_live)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_runtime_config(tmp_path, monkeypatch):
+    """Never let a developer's data/runtime_config.json leak into tests."""
+    from src import runtime_config
+
+    monkeypatch.setattr(runtime_config, "PATH", str(tmp_path / "runtime_config.json"))
+    runtime_config._cache.update(mtime=None, data={})
+    yield
+    runtime_config._cache.update(mtime=None, data={})

@@ -52,7 +52,8 @@ def _min_events() -> int:
 
 def _default_trust() -> float:
     try:
-        return min(1.0, max(0.0, float(os.getenv("LEARN_DEFAULT_TRUST", "0.6"))))
+        from src import runtime_config
+        return min(1.0, max(0.0, float(runtime_config.get("LEARN_DEFAULT_TRUST"))))
     except ValueError:
         return 0.6
 

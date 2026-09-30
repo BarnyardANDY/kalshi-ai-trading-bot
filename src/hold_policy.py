@@ -26,7 +26,8 @@ from src.utils.market_prices import get_market_prices, get_mid_prices
 
 def exit_margin() -> float:
     try:
-        return max(0.0, float(os.getenv("HOLD_EXIT_MARGIN", "0.05")))
+        from src import runtime_config
+        return max(0.0, float(runtime_config.get("HOLD_EXIT_MARGIN")))
     except ValueError:
         return 0.05
 

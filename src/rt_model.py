@@ -40,14 +40,16 @@ _LADDER_CACHE: Dict[str, tuple] = {}
 def rt_reprice_minutes() -> float:
     """Re-ask the AI about a film at most this often unless its reviews change."""
     try:
-        return max(0.0, float(os.getenv("RT_REPRICE_MINUTES", "60")))
+        from src import runtime_config
+        return max(0.0, float(runtime_config.get("RT_REPRICE_MINUTES")))
     except ValueError:
         return 60.0
 
 
 def rt_min_reviews() -> int:
     try:
-        return max(0, int(os.getenv("RT_MIN_REVIEWS", "5")))
+        from src import runtime_config
+        return max(0, int(runtime_config.get("RT_MIN_REVIEWS")))
     except ValueError:
         return 5
 

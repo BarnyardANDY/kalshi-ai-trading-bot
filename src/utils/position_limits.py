@@ -64,7 +64,8 @@ class PositionLimitsManager:
         
         # INCREASED: More aggressive limits for more opportunities
         self.max_positions = 15  # INCREASED: Allow 15 positions (was 10)
-        self.max_position_size_pct = 5.0  # INCREASED: 5% max per trade (was 3%)
+        from src import runtime_config  # live-editable from the dashboard
+        self.max_position_size_pct = float(runtime_config.get("MAX_POSITION_PCT"))
         self.warning_threshold = self.max_positions - 3  # Warning at 12 positions
         
         # Additional safety limits - MORE AGGRESSIVE FOR FULL PORTFOLIO USE
