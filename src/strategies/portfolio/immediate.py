@@ -39,6 +39,10 @@ async def create_market_opportunities_from_markets(
     from src import runtime_config as _rc
     _min_px, _max_px = float(_rc.get("MIN_PRICE")), float(_rc.get("MAX_PRICE"))
     _min_edge, _min_conf = float(_rc.get("MIN_EDGE")), float(_rc.get("MIN_CONFIDENCE"))
+    _fee_aware = bool(_rc.get("FEE_AWARE_EDGE"))
+    _max_slip = float(_rc.get("MAX_SLIPPAGE"))
+    _max_days = int(_rc.get("MAX_DAYS_TO_CLOSE"))
+    from src.cost_edge import days_to_close, net_edges, slippage
     _paused = _rc.paused()
     settings.trading.max_position_size_pct = float(_rc.get("MAX_POSITION_PCT"))
     _ai_cap = float(_rc.get("DAILY_AI_COST_LIMIT"))
@@ -128,6 +132,13 @@ async def create_market_opportunities_from_markets(
             # Skip markets with extreme prices (too risky for portfolio)
             if market_prob < _min_px or market_prob > _max_px:
                 continue
+
+            # Skip markets that won't settle for a long time (checked before any AI call)
+            if _max_days > 0:
+                _dtc = days_to_close(market_info)
+                if _dtc is not None and _dtc > _max_days:
+                    logger.info(f"⏭️ {market.market_id}: closes in {_dtc:.0f} days (> {_max_days}), skipping")
+                    continue
             
             if market.market_id in rt_predictions:
                 # Already priced as part of its film's ladder / city-day forecast.
@@ -200,14 +211,27 @@ async def create_market_opportunities_from_markets(
             from src.utils.edge_filter import EdgeFilter
             edge_result = EdgeFilter.calculate_edge(predicted_prob, market_prob, confidence)
             
+            # Edge against what a trade would really cost: the ask (+ fee), not the midpoint.
+            _costs = net_edges(predicted_prob, market_info, fee_aware=_fee_aware)
+            _net, _net_side = _costs["best_net"], _costs["best_side"]
             if edge_result.passes_filter and (
-                edge_result.edge_percentage < _min_edge or confidence < _min_conf
+                _net is None or _net < _min_edge or confidence < _min_conf
             ):
                 logger.info(
-                    f"❌ BELOW YOUR GATES: {market.market_id} - edge {edge_result.edge_percentage:.1%} "
-                    f"(min {_min_edge:.0%}), confidence {confidence:.0%} (min {_min_conf:.0%})"
+                    f"❌ BELOW YOUR GATES: {market.market_id} - net edge "
+                    f"{(_net if _net is not None else 0):.1%} after ask{' + fee' if _fee_aware else ''} "
+                    f"(midpoint edge {edge_result.edge_percentage:.1%}; min {_min_edge:.0%}), "
+                    f"confidence {confidence:.0%} (min {_min_conf:.0%})"
                 )
                 continue
+            if edge_result.passes_filter and _max_slip > 0:
+                _slip = slippage(market_info, _net_side)
+                if _slip is None or _slip > _max_slip + 1e-9:
+                    logger.info(
+                        f"❌ BOOK TOO WIDE: {market.market_id} - {_net_side} ask is "
+                        f"{(_slip or 0) * 100:.1f}c above mid (max {_max_slip * 100:.0f}c)"
+                    )
+                    continue
             if _paused:
                 continue
             if edge_result.passes_filter:  # Must pass 10% edge filter
@@ -231,13 +255,18 @@ async def create_market_opportunities_from_markets(
                     max_drawdown_contribution=0.0
                 )
                 
-                # Add edge filter results to opportunity
-                opportunity.edge = edge_result.edge_magnitude  # Use filtered edge
-                opportunity.edge_percentage = edge_result.edge_percentage
-                opportunity.recommended_side = edge_result.side
+                # Edge after costs drives side and sizing; keep the asks for execution.
+                opportunity.edge = _net if _net_side == "YES" else -_net
+                opportunity.edge_percentage = _net
+                opportunity.recommended_side = _net_side
+                opportunity.yes_ask = _costs["yes_ask"]
+                opportunity.no_ask = _costs["no_ask"]
                 
                 opportunities.append(opportunity)
-                logger.info(f"✅ EDGE APPROVED: {market.market_id} - Edge: {edge_result.edge_percentage:.1%} ({edge_result.side}), Confidence: {confidence:.1%}, Reason: {edge_result.reason}")
+                logger.info(
+                    f"✅ EDGE APPROVED: {market.market_id} - net edge {_net:.1%} ({_net_side}) after costs "
+                    f"(midpoint {edge_result.edge_percentage:.1%}), confidence {confidence:.1%}"
+                )
                 
                 # 🚀 IMMEDIATE TRADING: Place trade for strong opportunities
                 if db_manager:
@@ -418,12 +447,13 @@ async def _evaluate_immediate_trade(
         side = "NO" if opportunity.edge < 0 else "YES"  # Negative edge = market overpriced = bet NO
         
         # Calculate proper entry price (what we expect to pay)
+        # Size at the ASK we judged the edge against (falls back to the midpoint).
+        _ask = getattr(opportunity, "yes_ask" if side == "YES" else "no_ask", None)
         if side == "YES":
-            entry_price = opportunity.market_probability  # Price for YES shares
-            shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
+            entry_price = _ask if _ask and 0 < _ask < 1 else opportunity.market_probability
         else:
-            entry_price = 1 - opportunity.market_probability  # Price for NO shares  
-            shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
+            entry_price = _ask if _ask and 0 < _ask < 1 else 1 - opportunity.market_probability
+        shares = max(1, int(position_size / entry_price))  # Minimum 1 contract
         
         # Verify we can afford at least 1 contract
         min_cost = shares * entry_price

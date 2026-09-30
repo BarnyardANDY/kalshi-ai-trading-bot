@@ -88,6 +88,16 @@ async def execute_position(
                 return False
             # --- End price sanity checks ---
 
+            # Slippage guard: don't chase a price that ran away since sizing.
+            from src import runtime_config as _rc
+            _max_slip = float(_rc.get("MAX_SLIPPAGE"))
+            if _max_slip > 0 and position.entry_price and ask_dollars - position.entry_price > _max_slip + 1e-9:
+                logger.warning(
+                    f"⚠️  Skipping {position.market_id}: {side_lower} ask {ask_dollars:.2f} is more than "
+                    f"{_max_slip * 100:.0f}c above the {position.entry_price:.2f} it was sized at"
+                )
+                return False
+
             if side_lower == "yes":
                 yes_ask_cents = int(round(yes_ask_dollars * 100))
                 if not (1 <= yes_ask_cents <= 99):
@@ -159,6 +169,17 @@ async def execute_position(
             market_data = {}
             logger.warning(f"Could not load book for paper fill on {position.market_id}: {e}")
         fill = entry_fill(market_data or {}, position.side, position.quantity)
+        from src import runtime_config as _rc
+        from src.cost_edge import side_ask
+        _max_slip = float(_rc.get("MAX_SLIPPAGE"))
+        _ask_now = side_ask(market_data or {}, position.side)
+        if (fill is not None and _max_slip > 0 and _ask_now and position.entry_price
+                and _ask_now - position.entry_price > _max_slip + 1e-9):
+            logger.info(
+                f"📝 PAPER TRADE SKIPPED for {position.market_id}: ask {_ask_now:.2f} moved more than "
+                f"{_max_slip * 100:.0f}c past the {position.entry_price:.2f} it was sized at"
+            )
+            fill = None
         if fill is None:
             logger.info(f"📝 PAPER TRADE SKIPPED for {position.market_id}: no {position.side} ask to buy at")
             try:

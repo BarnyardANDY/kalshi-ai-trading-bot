@@ -500,8 +500,9 @@ class UnifiedAdvancedTradingSystem:
                     
                     # Get price for the intended side (already determined above)
                     from src.utils.market_prices import get_mid_prices
+                    from src.cost_edge import side_ask
                     _yes_px, _no_px = get_mid_prices(market_info)
-                    price = _yes_px if intended_side == "YES" else _no_px
+                    price = side_ask(market_info, intended_side) or (_yes_px if intended_side == "YES" else _no_px)
                     if price <= 0:
                         self.logger.warning(f"No live price for {market_id}, skipping")
                         continue
