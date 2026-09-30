@@ -250,9 +250,17 @@ def parse_nws_forecast(data: Dict[str, Any], kind: str) -> Dict[date, float]:
     return out
 
 
-def parse_observed_extreme(data: Dict[str, Any], day: date, tz: str, kind: str) -> Optional[float]:
-    """Highest (or lowest) °F observed at the station so far on ``day``."""
+def standard_time_zone(day: date, tz: str) -> timezone:
+    """Fixed LOCAL STANDARD time for ``tz`` (climate reports ignore daylight saving,
+    so during DST the official 'day' runs 1am-1am on the wall clock)."""
     zone = ZoneInfo(tz)
+    noon = datetime.combine(day, datetime.min.time().replace(hour=12), zone)
+    return timezone(noon.utcoffset() - (noon.dst() or timedelta(0)))
+
+
+def parse_observed_extreme(data: Dict[str, Any], day: date, tz: str, kind: str) -> Optional[float]:
+    """Highest (or lowest) °F observed at the station so far on climate-day ``day``."""
+    zone = standard_time_zone(day, tz)
     vals = []
     for f in (data or {}).get("features") or []:
         p = f.get("properties") or {}
@@ -290,7 +298,7 @@ async def fetch_inputs(code: str, day: date, kind: str) -> Dict[str, Any]:
     observed = None
     today = datetime.now(ZoneInfo(tz)).date()
     if day == today:
-        start = datetime.combine(day, datetime.min.time(), ZoneInfo(tz)).astimezone(timezone.utc)
+        start = datetime.combine(day, datetime.min.time(), standard_time_zone(day, tz)).astimezone(timezone.utc)
         obs = await _get_json(
             f"https://api.weather.gov/stations/{icao}/observations?start="
             + start.strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -114,3 +114,13 @@ def test_predict_weather_end_to_end(monkeypatch):
     assert set(out) == {m.market_id for m in ms}
     assert out[f"{event}-B72.5"][0] > out[f"{event}-T76"][0] > 0
     assert out[f"{event}-B72.5"][1] == 0.8
+
+
+def test_climate_day_uses_local_standard_time():
+    # 00:30 EDT on Sep 30 = 23:30 EST on Sep 29 -> belongs to the Sep 29 climate day
+    obs = {"features": [
+        {"properties": {"timestamp": "2026-09-30T04:30:00+00:00", "temperature": {"value": 10.0}}},
+        {"properties": {"timestamp": "2026-09-30T12:00:00+00:00", "temperature": {"value": 15.0}}},
+    ]}
+    assert W.parse_observed_extreme(obs, date(2026, 9, 30), "America/New_York", "low") == 59
+    assert W.parse_observed_extreme(obs, date(2026, 9, 29), "America/New_York", "low") == 50
