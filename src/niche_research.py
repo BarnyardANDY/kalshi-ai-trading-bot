@@ -346,6 +346,10 @@ async def build_research_context(niche_name: Optional[str], market: Dict[str, An
             extra = await _rt_context(market)
         elif niche_name == "trump_mentions":
             extra = await _mention_context(market)
+        elif niche_name == "weather":
+            from src.weather_model import describe, forecast_for_event
+            fc = await forecast_for_event(market)
+            extra = describe(fc) if fc else "No station mapping or forecast available for this market."
         else:
             extra = ""
     except Exception as e:  # never let research break trading

@@ -64,6 +64,26 @@ async def create_market_opportunities_from_markets(
             key=lambda m: m.volume, reverse=True,
         )[:40]
 
+    # Weather ranges are priced from forecasts (src/weather_model.py): one
+    # forecast per city-day, no AI calls, so they don't use the AI cap either.
+    if any(n.name == "weather" for n in _enabled):
+        from src.weather_model import predict_weather, parse_range
+        wx_markets = [
+            m for m in markets
+            if (niche_for_ticker(m.market_id, _enabled) or None) is not None
+            and niche_for_ticker(m.market_id, _enabled).name == "weather"
+            and parse_range(m.title) is not None
+        ]
+        if wx_markets:
+            wx_pred = await predict_weather(wx_markets, kalshi_client, logger)
+            rt_predictions.update(wx_pred)
+            wx_ids = {m.market_id for m in wx_markets}
+            markets = [m for m in markets if m.market_id not in wx_ids]
+            rt_markets = list(rt_markets) + sorted(
+                (m for m in wx_markets if m.market_id in wx_pred),
+                key=lambda m: m.volume, reverse=True,
+            )[:60]
+
     # Limit markets to prevent excessive AI costs and focus on best opportunities
     max_markets_to_analyze = 10  # REDUCED: More selective (was 20, now 10) to focus on highest quality
     if len(markets) > max_markets_to_analyze:
@@ -92,7 +112,7 @@ async def create_market_opportunities_from_markets(
                 continue
             
             if market.market_id in rt_predictions:
-                # Already priced as part of its film's ladder.
+                # Already priced as part of its film's ladder / city-day forecast.
                 predicted_prob, confidence = rt_predictions[market.market_id]
             else:
                 # Niche markets get fresh research (RT scores, news) in the prompt

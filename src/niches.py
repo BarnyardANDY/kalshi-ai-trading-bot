@@ -48,6 +48,13 @@ NICHES: Dict[str, Niche] = {
         series=("KXRT",),
         prefixes=("KXRT",),
     ),
+    "weather": Niche(
+        name="weather",
+        label="Daily high/low temperature",
+        series=("KXHIGHNY",),
+        prefixes=("KXHIGH", "KXLOWT"),
+        discovery=({"tags": "Daily temperature"},),
+    ),
     "trump_mentions": Niche(
         name="trump_mentions",
         label="Trump mention markets",
