@@ -149,10 +149,30 @@ async def execute_position(
             logger.error(f"❌ FAILED to place LIVE order for {position.market_id}: {e}")
             return False
     else:
-        # Simulate the trade
-        await db_manager.update_position_to_live(position.id, position.entry_price)
+        # Simulate the trade at a REALISTIC price: the current ask for this
+        # side plus Kalshi's fee (not the midpoint), so paper P&L reflects
+        # what a real order would have cost.
+        from src.paper_fills import entry_fill
+        try:
+            market_data = await kalshi_client.get_market(position.market_id)
+        except Exception as e:
+            market_data = {}
+            logger.warning(f"Could not load book for paper fill on {position.market_id}: {e}")
+        fill = entry_fill(market_data or {}, position.side, position.quantity)
+        if fill is None:
+            logger.info(f"📝 PAPER TRADE SKIPPED for {position.market_id}: no {position.side} ask to buy at")
+            try:
+                await db_manager.update_position_status(position.id, "cancelled")
+            except Exception:
+                pass
+            return False
+        await db_manager.update_position_to_live(position.id, fill)
+        position.entry_price = fill
         logger.info(f"📝 PAPER TRADE SIMULATED for {position.market_id} - No real money used")
-        logger.info(f"📊 Would have used: ${position.quantity * position.entry_price:.2f}")
+        logger.info(
+            f"📊 Paper fill: {position.quantity} {position.side} @ ${fill:.3f} (ask + fee) "
+            f"= ${position.quantity * fill:.2f}"
+        )
         return True
 
 
@@ -272,6 +292,12 @@ async def place_profit_taking_orders(
         for position in positions:
             try:
                 results['positions_processed'] += 1
+
+                # Niche positions hold to settlement (see src/hold_policy.py)
+                from src.niches import enabled_niches, niche_for_ticker
+                _en = enabled_niches()
+                if _en and niche_for_ticker(position.market_id, _en):
+                    continue
                 
                 # Get current market data
                 market_response = await kalshi_client.get_market(position.market_id)
@@ -359,6 +385,12 @@ async def place_stop_loss_orders(
         for position in positions:
             try:
                 results['positions_processed'] += 1
+
+                # Niche positions hold to settlement (see src/hold_policy.py)
+                from src.niches import enabled_niches, niche_for_ticker
+                _en = enabled_niches()
+                if _en and niche_for_ticker(position.market_id, _en):
+                    continue
                 
                 # Get current market data
                 market_response = await kalshi_client.get_market(position.market_id)

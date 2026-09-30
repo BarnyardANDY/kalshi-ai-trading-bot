@@ -32,15 +32,17 @@ async def should_exit_position(
     """
     current_price = current_yes_price if position.side == "YES" else current_no_price
     
-    # 1. Market resolution (original logic)
-    if market_status == 'closed':
-        # If market resolved, use the result to determine exit price
-        if market_result:
-            exit_price = 1.0 if market_result == position.side else 0.0
-        else:
-            # Fallback to current price if no result available
-            exit_price = current_price
+    # 1. Market resolution. Kalshi reports result as lowercase "yes"/"no"
+    # (the old check compared it to "YES"/"NO", so winners settled at $0),
+    # and a resolved market's status is "settled"/"finalized", not only
+    # "closed". Settle on the result; if closed without a result yet, wait
+    # rather than "exiting" at a stale midpoint.
+    result = (market_result or "").strip().lower()
+    if result in ("yes", "no"):
+        exit_price = 1.0 if result == position.side.lower() else 0.0
         return True, "market_resolution", exit_price
+    if market_status in ("closed", "settled", "finalized", "determined"):
+        return False, "", current_price
     
     # 2. ENHANCED Stop-loss exit using proper logic for YES/NO positions
     if position.stop_loss_price:
@@ -192,8 +194,14 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                 market_status = market_data.get('status', 'unknown')
                 market_result = market_data.get('result')  # Market resolution result
                 
+                from src.niches import enabled_niches, niche_for_ticker
+                _en = enabled_niches()
+                _niche = niche_for_ticker(position.market_id, _en) if _en else None
+
                 # If position doesn't have exit strategy set, calculate defaults
-                if not position.stop_loss_price and not position.take_profit_price:
+                if _niche:
+                    pass  # niche positions hold to settlement; no stop/take-profit levels
+                elif not position.stop_loss_price and not position.take_profit_price:
                     logger.info(f"Setting up exit strategy for position {position.market_id}")
                     exit_levels = await calculate_dynamic_exit_levels(position)
                     
@@ -205,9 +213,30 @@ async def run_tracking(db_manager: Optional[DatabaseManager] = None):
                     position.target_confidence_change = exit_levels["target_confidence_change"]
 
                 # Check if position should be exited (market resolution, time-based, etc.)
-                should_exit, exit_reason, exit_price = await should_exit_position(
-                    position, current_yes_price, current_no_price, market_status, market_result
-                )
+                if _niche:
+                    from src.hold_policy import niche_exit_decision
+                    should_exit, exit_reason, exit_price = niche_exit_decision(
+                        position, market_data, _niche.name
+                    )
+                    if not should_exit:
+                        logger.debug(f"{position.market_id}: {exit_reason}")
+                else:
+                    should_exit, exit_reason, exit_price = await should_exit_position(
+                        position, current_yes_price, current_no_price, market_status, market_result
+                    )
+
+                # Paper mode: a non-settlement exit sells at the BID minus fees,
+                # not the midpoint, so paper P&L matches what real money would get.
+                from src.config.settings import settings as _s
+                if (should_exit and exit_reason != "market_resolution"
+                        and not getattr(_s.trading, "live_trading_enabled", False)):
+                    from src.paper_fills import exit_fill
+                    realistic = exit_fill(market_data, position.side, position.quantity)
+                    if realistic is None:
+                        logger.info(f"{position.market_id}: wanted to exit ({exit_reason}) but no bid; holding")
+                        should_exit = False
+                    else:
+                        exit_price = realistic
 
                 if should_exit:
                     logger.info(

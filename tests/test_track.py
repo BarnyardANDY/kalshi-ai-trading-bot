@@ -205,6 +205,9 @@ async def test_non_resolution_exit_closes_after_successful_sell(
             "result": None,
             "yes_price": 65,
             "no_price": 35,
+            # A real book: paper exits sell at the bid (no bid -> no exit).
+            "yes_bid_dollars": "0.64", "yes_ask_dollars": "0.66",
+            "no_bid_dollars": "0.34", "no_ask_dollars": "0.36",
         }
     })
     mock_api.close = AsyncMock()

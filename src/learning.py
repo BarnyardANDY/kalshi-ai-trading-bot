@@ -328,3 +328,16 @@ def pending_count(path: Optional[str] = None) -> Dict[str, int]:
         return dict(c.execute(
             "SELECT niche, COUNT(DISTINCT market_id) FROM predictions WHERE outcome IS NULL GROUP BY niche"
         ).fetchall())
+
+
+def latest_prediction(market_id: str, max_age_hours: float = 12.0,
+                      path: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Most recent recorded estimate for a market, if fresh enough."""
+    with closing(_conn(path)) as c:
+        row = c.execute(
+            "SELECT ts, our_prob, market_prob, niche FROM predictions WHERE market_id=? ORDER BY ts DESC LIMIT 1",
+            (market_id,),
+        ).fetchone()
+    if not row or time.time() - row[0] > max_age_hours * 3600:
+        return None
+    return {"ts": row[0], "our_prob": row[1], "market_prob": row[2], "niche": row[3]}
