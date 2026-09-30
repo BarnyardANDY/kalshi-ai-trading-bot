@@ -1233,11 +1233,12 @@ def cmd_history(args: argparse.Namespace) -> None:
                         f"{t['quantity']:>4} ${t['pnl']:>7.2f}  {cat}"
                     )
 
-            # Blocked trades summary
-            cursor2 = await db.execute("""
-                SELECT COUNT(*) FROM blocked_trades
-            """)
-            r2 = await cursor2.fetchone()
+            # Blocked trades summary (table only exists once the enforcer has run)
+            try:
+                cursor2 = await db.execute("SELECT COUNT(*) FROM blocked_trades")
+                r2 = await cursor2.fetchone()
+            except Exception:
+                r2 = None
             if r2 and r2[0]:
                 print(f"\n  ⛔ {r2[0]} trades blocked by portfolio enforcer (use 'python cli.py health' for details)")
 
