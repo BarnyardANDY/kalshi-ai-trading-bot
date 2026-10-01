@@ -61,6 +61,12 @@ NICHES: Dict[str, Niche] = {
         series=("KXNFLGAME", "KXNCAAFGAME", "KXMLBGAME", "KXNBAGAME", "KXNHLGAME"),
         prefixes=("KXNFLGAME", "KXNCAAFGAME", "KXMLBGAME", "KXNBAGAME", "KXNHLGAME"),
     ),
+    "stocks": Niche(
+        name="stocks",
+        label="S&P 500 / Nasdaq-100 vs options market",
+        series=("KXINX", "KXINXU", "KXNASDAQ100", "KXNASDAQ100U"),
+        prefixes=(),  # exact series only: KXINX* also covers yearly/weekly/etc. series
+    ),
     "trump_mentions": Niche(
         name="trump_mentions",
         label="Trump mention markets",

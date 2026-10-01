@@ -101,6 +101,20 @@ async def create_market_opportunities_from_markets(
                 key=lambda m: m.volume, reverse=True,
             )[:60]
 
+    # Stock-index ranges are priced from the options market (VIX / VXN), no AI.
+    if any(n.name == "stocks" for n in _enabled):
+        from src.stocks_model import predict_stocks, series_info as _idx_series
+        st_markets = [m for m in markets if _idx_series(m.market_id)]
+        if st_markets:
+            st_pred = await predict_stocks(st_markets, kalshi_client, logger)
+            rt_predictions.update(st_pred)
+            st_ids = {m.market_id for m in st_markets}
+            markets = [m for m in markets if m.market_id not in st_ids]
+            rt_markets = list(rt_markets) + sorted(
+                (m for m in st_markets if m.market_id in st_pred),
+                key=lambda m: m.volume, reverse=True,
+            )[:60]
+
     # Weather ranges are priced from forecasts (src/weather_model.py): one
     # forecast per city-day, no AI calls, so they don't use the AI cap either.
     if any(n.name == "weather" for n in _enabled):

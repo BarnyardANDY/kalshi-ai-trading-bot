@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 PATH = os.getenv("RUNTIME_CONFIG", "data/runtime_config.json")
 
-ALL_NICHES = ["rotten_tomatoes", "trump_mentions", "weather", "sports"]
+ALL_NICHES = ["rotten_tomatoes", "trump_mentions", "weather", "sports", "stocks"]
 ALL_LEAGUES = ["nfl", "ncaaf", "mlb", "nba", "nhl"]
 
 # key, label, type, default, min, max, step, unit, group, help
@@ -28,7 +28,7 @@ SPEC: List[Dict[str, Any]] = [
      "help": "Stop opening new positions. Predictions and learning keep running; open positions are still managed."},
     {"key": "NICHES", "label": "Active niches", "type": "niches", "default": "rotten_tomatoes,trump_mentions,weather",
      "group": "Master", "help": "Which market groups the bot scans. New niches appear within ~5 minutes."},
-    {"key": "SHADOW_NICHES", "label": "Shadow-only niches", "type": "niches", "default": "sports", "group": "Master",
+    {"key": "SHADOW_NICHES", "label": "Shadow-only niches", "type": "niches", "default": "sports,stocks", "group": "Master",
      "help": "Niches that predict and get graded but never trade, until you're convinced by their record."},
 
     {"key": "MIN_EDGE", "label": "Min edge", "type": "float", "default": 0.10, "min": 0.0, "max": 0.5,
@@ -80,6 +80,10 @@ SPEC: List[Dict[str, Any]] = [
      "max": 1440, "step": 15, "unit": "min", "group": "Niche settings",
      "help": "How often to re-download sportsbook odds per league. Lower = fresher but uses more of the "
              "monthly Odds API quota (free: 500)."},
+    {"key": "STOCKS_VOL_SCALE", "label": "Stocks: implied-vol multiplier", "type": "float", "default": 1.0,
+     "min": 0.5, "max": 1.5, "step": 0.05, "unit": "x", "group": "Niche settings",
+     "help": "Scales the VIX/VXN used to price index ranges. Options usually overstate actual moves a little; "
+             "the learning record will show whether a lower value fits better."},
     {"key": "DAILY_AI_COST_LIMIT", "label": "Daily AI budget", "type": "float", "default": 2.0, "min": 0.0,
      "max": 50.0, "step": 0.5, "unit": "$", "group": "Niche settings",
      "help": "AI spend cap per day (Rotten Tomatoes + Trump). Weather uses no AI."},

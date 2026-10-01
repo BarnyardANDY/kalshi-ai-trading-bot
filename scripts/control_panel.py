@@ -31,7 +31,7 @@ ACCENT = "#8b5cf6"
 GREEN = "#34d399"
 RED = "#f87171"
 NICHE_LABELS = {"rotten_tomatoes": "Rotten Tomatoes", "trump_mentions": "Trump mentions",
-                "weather": "Weather", "sports": "Sports", "other": "Other"}
+                "weather": "Weather", "sports": "Sports", "stocks": "Stocks", "other": "Other"}
 
 st.set_page_config(page_title="Kalshi Bot Control", page_icon="📈", layout="wide")
 st.markdown(

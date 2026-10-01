@@ -373,6 +373,9 @@ async def build_research_context(niche_name: Optional[str], market: Dict[str, An
             extra = await _rt_context(market)
         elif niche_name == "trump_mentions":
             extra = await _mention_context(market)
+        elif niche_name == "stocks":
+            from src.stocks_model import describe as _stocks_describe
+            extra = await _stocks_describe(market)
         elif niche_name == "sports":
             extra = await _sports_context(market)
         elif niche_name == "weather":
