@@ -61,28 +61,52 @@ def norm(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _abbr_nickname(side: str) -> Optional[str]:
+    """'KC Chiefs' -> 'Chiefs' (NFL rules write teams as ABBR + nickname)."""
+    m = re.match(r"^([A-Z]{2,4})\s+(\S.*)$", side.strip())
+    return m.group(2).strip() if m else None
+
+
+def _same_team(label: str, side: str) -> bool:
+    a, b = norm(label), norm(side)
+    return bool(a) and (a == b or b.startswith(a) or a.startswith(b))
+
+
 def parse_game(market: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """{yes, no, date, nickname?} for a Kalshi game-winner market."""
-    yes = (market.get("yes_sub_title") or "").strip()
+    """{yes, no, date, nickname, no_nickname} for a Kalshi game-winner market."""
     rules = market.get("rules_primary") or ""
+    yes = (market.get("yes_sub_title") or "").strip()
     if not yes:
         m = re.match(r"\s*(.+?) wins\b", market.get("title") or "")
         yes = m.group(1).strip() if m else ""
-    no = (market.get("no_sub_title") or "").strip()
     m = re.search(r"wins the (.+?) vs (.+?) game\b", rules)
     sides = [m.group(1).strip(), m.group(2).strip()] if m else []
     if sides:
         # trailing sport words: "NO Saints Pro Football" -> "NO Saints"
         sides[1] = re.sub(r"\s+(Pro|College|professional|college)\b.*$", "", sides[1]).strip()
-    if not no and len(sides) == 2:
-        no = sides[1] if norm(sides[0]).startswith(norm(yes)) or norm(yes) in norm(sides[0]) else sides[0]
-    # NFL rules use "ATL Falcons": capture the nickname for the YES team
-    nickname = None
-    abbr = (market.get("ticker") or "").rsplit("-", 1)[-1]
-    for side in sides:
-        parts = side.split(" ", 1)
-        if len(parts) == 2 and parts[0].upper() == abbr.upper():
-            nickname = parts[1]
+
+    # Which side is YES? Prefer the ticker's team code (e.g. -LV), then the name.
+    abbr = (market.get("ticker") or "").rsplit("-", 1)[-1].upper()
+    yes_idx = None
+    for i, side in enumerate(sides):
+        if side.split(" ", 1)[0].upper() == abbr and _abbr_nickname(side):
+            yes_idx = i
+    if yes_idx is None:
+        for i, side in enumerate(sides):
+            if _same_team(yes, side):
+                yes_idx = i
+    nickname = no_nickname = None
+    no = ""
+    if len(sides) == 2 and yes_idx is not None:
+        no_side = sides[1 - yes_idx]
+        nickname = _abbr_nickname(sides[yes_idx])
+        no_nickname = _abbr_nickname(no_side)
+        no = no_side
+    # Kalshi's no_sub_title is often just the YES team again; only trust a real opponent.
+    nst = (market.get("no_sub_title") or "").strip()
+    if not no and nst and not _same_team(yes, nst):
+        no = nst
+
     day = None
     d = re.search(r"scheduled for ([A-Z][a-z]{2})\w* (\d{1,2}), (\d{4})", rules)
     if d and d.group(1).upper() in _MONTHS:
@@ -93,7 +117,7 @@ def parse_game(market: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             day = datetime(2000 + int(t.group(1)), _MONTHS[t.group(2)], int(t.group(3))).date()
     if not yes or not day:
         return None
-    return {"yes": yes, "no": no, "date": day, "nickname": nickname}
+    return {"yes": yes, "no": no, "date": day, "nickname": nickname, "no_nickname": no_nickname}
 
 
 # ----------------------------------------------------------------------------
@@ -127,7 +151,7 @@ def find_event(game: Dict[str, Any], events: List[Dict[str, Any]]) -> Optional[T
         if len(yes_team) != 1:
             continue
         other = [t for t in teams if t != yes_team[0]][0]
-        if game.get("no") and not _team_matches(game["no"], other):
+        if game.get("no") and not _team_matches(game["no"], other, game.get("no_nickname")):
             continue
         same_day = start.astimezone(_ET).date() == game["date"]
         hits.append((0 if same_day else 1, ev, yes_team[0]))

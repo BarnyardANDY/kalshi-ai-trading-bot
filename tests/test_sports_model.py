@@ -28,7 +28,8 @@ def _ev(home, away, start, books):
 
 def test_parse_games():
     g = S.parse_game(NFL)
-    assert g == {"yes": "New Orleans", "no": "Atlanta", "date": date(2026, 10, 5), "nickname": "Saints"}
+    assert g["yes"] == "New Orleans" and g["nickname"] == "Saints"
+    assert g["no"] == "ATL Falcons" and g["no_nickname"] == "Falcons" and g["date"] == date(2026, 10, 5)
     g = S.parse_game(NCAAF)
     assert g["yes"] == "Fresno St." and g["no"] == "Boise St." and g["date"] == date(2026, 10, 10)
     g = S.parse_game(MLB)
@@ -109,3 +110,35 @@ def test_shadow_setting_default():
     from src import runtime_config as RC
     assert RC.get("SHADOW_NICHES") == "sports"
     assert RC.get("SPORTS_LEAGUES") == "nfl,ncaaf"
+
+
+def test_real_kalshi_shape_no_subtitle_repeats_yes_team():
+    # As seen live: no_sub_title is the YES team again, and teams are "KC Chiefs" / "LV Raiders"
+    m = {"ticker": "KXNFLGAME-26OCT04KCLV-LV", "title": "Las Vegas wins", "yes_sub_title": "Las Vegas",
+         "no_sub_title": "Las Vegas",
+         "rules_primary": "If Las Vegas wins the KC Chiefs vs LV Raiders Pro Football game originally "
+                          "scheduled for Oct 4, 2026, then the market resolves to Yes."}
+    g = S.parse_game(m)
+    assert g["nickname"] == "Raiders" and g["no_nickname"] == "Chiefs"
+    events = [_ev("Las Vegas Raiders", "Kansas City Chiefs", "2026-10-04T20:25:00Z",
+                  [("pinnacle", 2.6, 1.55)]),
+              _ev("Pittsburgh Steelers", "Cleveland Browns", "2026-10-02T00:15:00Z", [("fanduel", 1.7, 2.2)])]
+    ev, team = S.find_event(g, events)
+    assert team == "Las Vegas Raiders"
+    assert S.consensus(ev, team)["prob"] == pytest.approx((1 / 2.6) / (1 / 2.6 + 1 / 1.55))
+    pit = {"ticker": "KXNFLGAME-26OCT01PITCLE-PIT", "yes_sub_title": "Pittsburgh", "no_sub_title": "Pittsburgh",
+           "rules_primary": "If Pittsburgh wins the PIT Steelers vs CLE Browns Pro Football game originally "
+                            "scheduled for Oct 1, 2026, then the market resolves to Yes."}
+    ev, team = S.find_event(S.parse_game(pit), events)
+    assert team == "Pittsburgh Steelers"
+
+
+def test_college_and_mlb_without_nicknames():
+    m = {"ticker": "KXNCAAFGAME-26OCT03ALAMSST-ALA", "yes_sub_title": "Alabama", "no_sub_title": "Alabama",
+         "rules_primary": "If Alabama wins the Alabama vs Mississippi St. college football game originally "
+                          "scheduled for Oct 3, 2026, then the market resolves to Yes."}
+    g = S.parse_game(m)
+    assert g["yes"] == "Alabama" and g["no"] == "Mississippi St."
+    events = [_ev("Alabama Crimson Tide", "Mississippi State Bulldogs", "2026-10-03T23:30:00Z",
+                  [("draftkings", 1.2, 4.8)])]
+    assert S.find_event(g, events)[1] == "Alabama Crimson Tide"
