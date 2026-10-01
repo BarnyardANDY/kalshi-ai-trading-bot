@@ -108,7 +108,7 @@ def test_no_key_skips(monkeypatch):
 
 def test_shadow_setting_default():
     from src import runtime_config as RC
-    assert RC.get("SHADOW_NICHES") == "sports"
+    assert RC.get("SHADOW_NICHES") == "sports,stocks"
     assert RC.get("SPORTS_LEAGUES") == "nfl,ncaaf"
 
 
