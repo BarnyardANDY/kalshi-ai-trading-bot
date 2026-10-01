@@ -19,7 +19,8 @@ from typing import Any, Dict, List, Optional
 
 PATH = os.getenv("RUNTIME_CONFIG", "data/runtime_config.json")
 
-ALL_NICHES = ["rotten_tomatoes", "trump_mentions", "weather"]
+ALL_NICHES = ["rotten_tomatoes", "trump_mentions", "weather", "sports"]
+ALL_LEAGUES = ["nfl", "ncaaf", "mlb", "nba", "nhl"]
 
 # key, label, type, default, min, max, step, unit, group, help
 SPEC: List[Dict[str, Any]] = [
@@ -27,6 +28,8 @@ SPEC: List[Dict[str, Any]] = [
      "help": "Stop opening new positions. Predictions and learning keep running; open positions are still managed."},
     {"key": "NICHES", "label": "Active niches", "type": "niches", "default": "rotten_tomatoes,trump_mentions,weather",
      "group": "Master", "help": "Which market groups the bot scans. New niches appear within ~5 minutes."},
+    {"key": "SHADOW_NICHES", "label": "Shadow-only niches", "type": "niches", "default": "sports", "group": "Master",
+     "help": "Niches that predict and get graded but never trade, until you're convinced by their record."},
 
     {"key": "MIN_EDGE", "label": "Min edge", "type": "float", "default": 0.10, "min": 0.0, "max": 0.5,
      "step": 0.01, "unit": "pts", "scale": 100, "group": "Signal gates",
@@ -69,6 +72,14 @@ SPEC: List[Dict[str, Any]] = [
     {"key": "RT_REPRICE_MINUTES", "label": "RT: re-price every", "type": "int", "default": 60, "min": 5, "max": 1440,
      "step": 5, "unit": "min", "group": "Niche settings",
      "help": "Re-ask the AI about a film at most this often unless new reviews land."},
+    {"key": "SPORTS_LEAGUES", "label": "Sports: leagues", "type": "multi", "options": ALL_LEAGUES,
+     "default": "nfl,ncaaf", "group": "Niche settings",
+     "help": "Leagues compared with sportsbook odds. Each costs ~1 Odds API request per refresh "
+             "(free tier: 500/month)."},
+    {"key": "ODDS_REFRESH_MINUTES", "label": "Sports: odds refresh", "type": "int", "default": 240, "min": 15,
+     "max": 1440, "step": 15, "unit": "min", "group": "Niche settings",
+     "help": "How often to re-download sportsbook odds per league. Lower = fresher but uses more of the "
+             "monthly Odds API quota (free: 500)."},
     {"key": "DAILY_AI_COST_LIMIT", "label": "Daily AI budget", "type": "float", "default": 2.0, "min": 0.0,
      "max": 50.0, "step": 0.5, "unit": "$", "group": "Niche settings",
      "help": "AI spend cap per day (Rotten Tomatoes + Trump). Weather uses no AI."},
@@ -100,7 +111,7 @@ def _coerce(spec: Dict[str, Any], value: Any) -> Any:
         if isinstance(value, str):
             return value.strip().lower() in ("1", "true", "yes", "on")
         return bool(value)
-    if t == "niches":
+    if t in ("niches", "multi"):
         items = value if isinstance(value, list) else str(value).split(",")
         return ",".join(n.strip().lower() for n in items if n and n.strip())
     v = float(value)

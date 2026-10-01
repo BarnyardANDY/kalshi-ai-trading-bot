@@ -31,7 +31,7 @@ ACCENT = "#8b5cf6"
 GREEN = "#34d399"
 RED = "#f87171"
 NICHE_LABELS = {"rotten_tomatoes": "Rotten Tomatoes", "trump_mentions": "Trump mentions",
-                "weather": "Weather", "other": "Other"}
+                "weather": "Weather", "sports": "Sports", "other": "Other"}
 
 st.set_page_config(page_title="Kalshi Bot Control", page_icon="📈", layout="wide")
 st.markdown(
@@ -192,10 +192,12 @@ with tab_ctrl:
                 col = cols[i % 2]
                 if spec["type"] == "bool":
                     new_vals[key] = col.toggle(label, value=bool(cur), help=spec["help"])
-                elif spec["type"] == "niches":
+                elif spec["type"] in ("niches", "multi"):
+                    opts = spec.get("options", RC.ALL_NICHES)
                     chosen = [n for n in str(cur).split(",") if n]
-                    new_vals[key] = col.multiselect(label, RC.ALL_NICHES, default=[n for n in chosen if n in RC.ALL_NICHES],
-                                                    format_func=lambda n: NICHE_LABELS.get(n, n), help=spec["help"])
+                    new_vals[key] = col.multiselect(label, opts, default=[n for n in chosen if n in opts],
+                                                    format_func=lambda n: NICHE_LABELS.get(n, n.upper()),
+                                                    help=spec["help"])
                 else:
                     scale = spec.get("scale", 1)
                     is_int = spec["type"] == "int"

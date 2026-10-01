@@ -332,6 +332,33 @@ async def _mention_context(market: Dict[str, Any]) -> str:
 # Entry point
 # ----------------------------------------------------------------------------
 
+async def _sports_context(market: Dict[str, Any]) -> str:
+    import os
+    from src import runtime_config as rc
+    from src import sports_model as S
+
+    lg = S.league_of(market.get("ticker") or "")
+    key = os.getenv("ODDS_API_KEY", "").strip()
+    if not lg:
+        return ""
+    if not key:
+        return "No ODDS_API_KEY in .env (free key at the-odds-api.com)."
+    game = S.parse_game(market)
+    if not game:
+        return "Could not read the teams/date from this market."
+    events = await S.fetch_odds(lg[1], key, float(rc.get("ODDS_REFRESH_MINUTES")))
+    found = S.find_event(game, events)
+    if not found:
+        return f"No matching sportsbook game found for {game['yes']} vs {game['no']} on {game['date']}."
+    ev, team = found
+    cons = S.consensus(ev, team)
+    if not cons:
+        return "Sportsbooks have no moneyline for this game yet."
+    return (f"Sportsbook consensus: {team} {cons['prob']:.1%} to win ({len(cons['books'])} books: "
+            f"{', '.join(cons['books'])}); game {ev.get('away_team')} @ {ev.get('home_team')} "
+            f"at {ev.get('commence_time')}. Odds API requests left: {S.quota()['remaining']}")
+
+
 async def build_research_context(niche_name: Optional[str], market: Dict[str, Any]) -> str:
     """Research block for the AI prompt. Empty string if nothing useful."""
     parts: List[str] = [f"Current date/time (UTC): {datetime.now(timezone.utc):%Y-%m-%d %H:%M}"]
@@ -346,6 +373,8 @@ async def build_research_context(niche_name: Optional[str], market: Dict[str, An
             extra = await _rt_context(market)
         elif niche_name == "trump_mentions":
             extra = await _mention_context(market)
+        elif niche_name == "sports":
+            extra = await _sports_context(market)
         elif niche_name == "weather":
             from src.weather_model import describe, forecast_for_event
             fc = await forecast_for_event(market)

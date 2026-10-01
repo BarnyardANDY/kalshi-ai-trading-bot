@@ -55,6 +55,12 @@ NICHES: Dict[str, Niche] = {
         prefixes=("KXHIGH", "KXLOWT"),
         discovery=({"tags": "Daily temperature"},),
     ),
+    "sports": Niche(
+        name="sports",
+        label="Game winners vs sportsbooks",
+        series=("KXNFLGAME", "KXNCAAFGAME", "KXMLBGAME", "KXNBAGAME", "KXNHLGAME"),
+        prefixes=("KXNFLGAME", "KXNCAAFGAME", "KXMLBGAME", "KXNBAGAME", "KXNHLGAME"),
+    ),
     "trump_mentions": Niche(
         name="trump_mentions",
         label="Trump mention markets",

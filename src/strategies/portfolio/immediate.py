@@ -44,6 +44,7 @@ async def create_market_opportunities_from_markets(
     _max_days = int(_rc.get("MAX_DAYS_TO_CLOSE"))
     from src.cost_edge import days_to_close, net_edges, slippage
     _paused = _rc.paused()
+    _shadow = {x for x in str(_rc.get("SHADOW_NICHES")).split(",") if x}
     settings.trading.max_position_size_pct = float(_rc.get("MAX_POSITION_PCT"))
     _ai_cap = float(_rc.get("DAILY_AI_COST_LIMIT"))
     settings.trading.daily_ai_cost_limit = _ai_cap
@@ -85,6 +86,20 @@ async def create_market_opportunities_from_markets(
             (m for m in rt_markets if m.market_id in rt_predictions),
             key=lambda m: m.volume, reverse=True,
         )[:40]
+
+    # Sports game winners are priced from the sportsbook consensus (no AI).
+    if any(n.name == "sports" for n in _enabled):
+        from src.sports_model import predict_sports, league_of
+        sp_markets = [m for m in markets if league_of(m.market_id)]
+        if sp_markets:
+            sp_pred = await predict_sports(sp_markets, kalshi_client, logger)
+            rt_predictions.update(sp_pred)
+            sp_ids = {m.market_id for m in sp_markets}
+            markets = [m for m in markets if m.market_id not in sp_ids]
+            rt_markets = list(rt_markets) + sorted(
+                (m for m in sp_markets if m.market_id in sp_pred),
+                key=lambda m: m.volume, reverse=True,
+            )[:60]
 
     # Weather ranges are priced from forecasts (src/weather_model.py): one
     # forecast per city-day, no AI calls, so they don't use the AI cap either.
@@ -185,6 +200,8 @@ async def create_market_opportunities_from_markets(
                             f"🧠 {market.market_id}: estimate {raw:.0%} -> {predicted_prob:.0%} "
                             f"(trust {_lp['trust']:.0%} from {_lp.get('events', 0)} settled events)"
                         )
+                    if _mn.name in _shadow:
+                        continue  # shadow niche: recorded and graded, never traded
                     if _lp.get("paused"):
                         logger.info(
                             f"🧠 {_mn.name} paused: its settled record isn't beating the market "
