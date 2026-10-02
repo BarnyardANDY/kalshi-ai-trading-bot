@@ -42,6 +42,9 @@ async def create_market_opportunities_from_markets(
     _fee_aware = bool(_rc.get("FEE_AWARE_EDGE"))
     _max_slip = float(_rc.get("MAX_SLIPPAGE"))
     _max_days = int(_rc.get("MAX_DAYS_TO_CLOSE"))
+    _max_edge = float(_rc.get("MAX_EDGE"))
+    _fav_px = float(_rc.get("FAVORITE_PRICE"))
+    _fav_extra = float(_rc.get("FAVORITE_EXTRA_EDGE"))
     from src.cost_edge import days_to_close, net_edges, slippage
     _paused = _rc.paused()
     _shadow = {x for x in str(_rc.get("SHADOW_NICHES")).split(",") if x}
@@ -255,6 +258,21 @@ async def create_market_opportunities_from_markets(
                     f"confidence {confidence:.0%} (min {_min_conf:.0%})"
                 )
                 continue
+            if edge_result.passes_filter and _net is not None and _net > _max_edge:
+                logger.info(
+                    f"❌ IMPLAUSIBLE EDGE: {market.market_id} - bot {predicted_prob:.0%} vs market "
+                    f"{market_prob:.0%} ({_net:.0%} net > {_max_edge:.0%} max); assuming a model/data error"
+                )
+                continue
+            if edge_result.passes_filter and _net is not None:
+                _side_ask = _costs["yes_ask"] if _net_side == "YES" else _costs["no_ask"]
+                if 0 < _side_ask <= 1 - _fav_px and _net < _min_edge + _fav_extra:
+                    logger.info(
+                        f"❌ FIGHTING A FAVORITE: {market.market_id} - buying {_net_side} at {_side_ask:.0%} "
+                        f"against a {1 - _side_ask:.0%} favorite needs {_min_edge + _fav_extra:.0%} net edge "
+                        f"(have {_net:.0%})"
+                    )
+                    continue
             if edge_result.passes_filter and _max_slip > 0:
                 _slip = slippage(market_info, _net_side)
                 if _slip is None or _slip > _max_slip + 1e-9:

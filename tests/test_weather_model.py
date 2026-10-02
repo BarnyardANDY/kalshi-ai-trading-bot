@@ -124,3 +124,25 @@ def test_climate_day_uses_local_standard_time():
     ]}
     assert W.parse_observed_extreme(obs, date(2026, 9, 30), "America/New_York", "low") == 59
     assert W.parse_observed_extreme(obs, date(2026, 9, 29), "America/New_York", "low") == 50
+
+
+def test_same_day_high_tightens_through_the_day():
+    mu, s, _ = W.same_day_adjust("high", 80.0, 3.0, hour=8, observed=70)
+    assert s == pytest.approx(2.88)          # morning: floor 1.8, capped at 1.6x floor
+    mu, s, _ = W.same_day_adjust("high", 80.0, 1.0, hour=14, observed=78)
+    assert 0.8 < s < 1.8
+    mu, s, phase = W.same_day_adjust("high", 80.0, 3.0, hour=17, observed=84)
+    assert mu == pytest.approx(84.4) and s == 0.7 and "after peak" in phase
+    # after the peak, the bucket holding the observed high is a strong favorite
+    p_obs = W.range_probability(84, 85, mu, s, "high", observed=84)
+    assert p_obs > 0.85
+
+
+def test_same_day_low_after_dawn():
+    mu, s, phase = W.same_day_adjust("low", 55.0, 2.5, hour=12, observed=52)
+    assert mu == pytest.approx(51.7) and s == 1.0 and "low mostly set" in phase
+
+
+def test_warmer_than_forecast_recentres():
+    mu, s, _ = W.same_day_adjust("high", 70.0, 2.0, hour=12, observed=74)
+    assert mu == pytest.approx(74.5)

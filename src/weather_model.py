@@ -336,7 +336,49 @@ async def forecast_for_event(sample_market: Dict[str, Any]) -> Optional[Dict[str
     if not bl:
         return None
     mu, sigma = bl
-    return {"code": code, "kind": kind, "day": day, "mu": mu, "sigma": sigma, **inp}
+    phase = ""
+    if inp["lead"] == 0:
+        hour = local_hour(inp["tz"])
+        mu, sigma, phase = same_day_adjust(kind, mu, sigma, hour, inp.get("observed"))
+    return {"code": code, "kind": kind, "day": day, "mu": mu, "sigma": sigma, "phase": phase, **inp}
+
+
+def local_hour(tz: str, now: Optional[datetime] = None) -> float:
+    t = (now or datetime.now(timezone.utc)).astimezone(ZoneInfo(tz))
+    return t.hour + t.minute / 60
+
+
+def same_day_adjust(kind: str, mu: float, sigma: float, hour: float,
+                    observed: Optional[float]) -> Tuple[float, float, str]:
+    """Shrink same-day uncertainty as the day plays out.
+
+    Highs usually peak mid/late afternoon: by ~4-5pm local the day's high is
+    essentially the highest reading so far (the official value can be a degree
+    above hourly readings, which miss brief peaks). Lows usually happen near
+    dawn, so by mid-morning the low is mostly set (though a late cold front can
+    still lower it before midnight).
+    """
+    def lerp(h, h0, h1, v0, v1):
+        if h <= h0:
+            return v0
+        if h >= h1:
+            return v1
+        return v0 + (v1 - v0) * (h - h0) / (h1 - h0)
+
+    if kind == "high":
+        if observed is not None and hour >= 16.5:
+            return observed + 0.4, 0.7, "after peak: high ~= observed"
+        floor = lerp(hour, 10, 16.5, 1.8, 0.8)
+        if observed is not None and observed > mu:
+            mu = observed + 0.5  # already warmer than forecast
+        # model disagreement matters less as observations accumulate
+        return mu, max(floor, min(sigma, floor * 1.6)), f"same-day {hour:.0f}h"
+    if observed is not None and hour >= 10:
+        return min(mu, observed - 0.3), 1.0, "after dawn: low mostly set"
+    floor = lerp(hour, 5, 10, 1.8, 1.0)
+    if observed is not None and observed < mu:
+        mu = observed - 0.5
+    return mu, max(floor, min(sigma, floor * 1.6)), f"same-day {hour:.0f}h"
 
 
 def describe(fc: Dict[str, Any]) -> str:
@@ -345,7 +387,8 @@ def describe(fc: Dict[str, Any]) -> str:
            if fc.get("observed") is not None else "")
     nws = f"{fc['nws']:.0f}°F" if fc.get("nws") is not None else "n/a"
     return (f"Forecast {fc['kind']} for {fc['icao']} on {fc['day']} (day+{fc['lead']}): "
-            f"models [{models}]°F, NWS {nws} -> center {fc['mu']:.1f}°F, spread ±{fc['sigma']:.1f}{obs}")
+            f"models [{models}]°F, NWS {nws} -> center {fc['mu']:.1f}°F, spread ±{fc['sigma']:.1f}{obs}"
+            + (f" [{fc['phase']}]" if fc.get("phase") else ""))
 
 
 async def predict_weather(markets, kalshi_client, logger) -> Dict[str, Tuple[float, float]]:
