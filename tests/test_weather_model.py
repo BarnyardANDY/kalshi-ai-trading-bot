@@ -1,6 +1,7 @@
 """Weather range pricing from forecasts (offline)."""
 import asyncio
 import math
+import statistics
 import time
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -58,11 +59,23 @@ def test_observed_low_caps_higher_ranges():
 
 def test_blend_and_spread():
     mu, s = W.blend([70, 72, 74, 72], 74, lead_days=1)
-    assert mu == pytest.approx(0.5 * 72 + 0.5 * 74)
+    assert mu == pytest.approx(0.65 * 74 + 0.35 * 72)
     assert s == W.spread_floor(1)  # models agree closely -> floor applies
-    mu, s = W.blend([60, 80], None, lead_days=0)
-    assert s == pytest.approx(1.2 * 10)  # big disagreement widens the spread
+    mu, s = W.blend([66, 70, 74], None, lead_days=0)
+    assert mu == 70 and s == pytest.approx(1.2 * statistics.pstdev([66, 70, 74]))
     assert W.blend([], None, 1) is None
+
+
+def test_blend_drops_coastal_outliers():
+    # Real case from LAX: models [87, 102, 96, 95], NWS 89. The old equal
+    # average centred at ~92F; the market had "above 92" at 8%.
+    mu, s = W.blend([87, 102, 96, 95], 89, lead_days=0)
+    assert mu == pytest.approx(0.65 * 89 + 0.35 * 91)   # kept 87 and 95 (within 6F of 89)
+    assert mu < 90
+    # same-day 9am, as the bot would price it
+    mu, s, _ = W.same_day_adjust("high", mu, s, hour=9, observed=70)
+    p_above_92 = W.range_probability(93, math.inf, mu, s, "high", observed=70)
+    assert p_above_92 < 0.20   # was ~45% before; market said 8%
 
 
 def test_parse_sources():

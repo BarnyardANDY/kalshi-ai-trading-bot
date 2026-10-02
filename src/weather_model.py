@@ -176,17 +176,31 @@ def spread_floor(lead_days: int) -> float:
     return {0: 1.8, 1: 2.5, 2: 3.3}.get(lead_days, 4.2 if lead_days > 2 else 1.8)
 
 
+NWS_WEIGHT = 0.65        # NWS point forecasts are tuned to the exact location
+OUTLIER_F = 6.0          # model values this far from the anchor are dropped
+
+
 def blend(model_values: List[float], nws_value: Optional[float], lead_days: int) -> Optional[Tuple[float, float]]:
-    """(mu, sigma) from model forecasts and the NWS forecast."""
+    """(mu, sigma) from global-model forecasts and the NWS point forecast.
+
+    Global models run on coarse grids and can misplace a station's local
+    climate badly (coastal LAX vs inland LA: one model said 102F when the NWS
+    said 89F). So: anchor on the NWS forecast when present, drop model values
+    more than OUTLIER_F away from it, use the MEDIAN of the rest, and weight
+    the NWS forecast more heavily. Without an NWS value, anchor on the model
+    median.
+    """
     vals = [v for v in model_values if v is not None]
     if not vals and nws_value is None:
         return None
-    model_mean = statistics.fmean(vals) if vals else None
-    if model_mean is not None and nws_value is not None:
-        mu = 0.5 * model_mean + 0.5 * nws_value
+    anchor = nws_value if nws_value is not None else statistics.median(vals)
+    kept = [v for v in vals if abs(v - anchor) <= OUTLIER_F]
+    model_mid = statistics.median(kept) if kept else None
+    if model_mid is not None and nws_value is not None:
+        mu = NWS_WEIGHT * nws_value + (1 - NWS_WEIGHT) * model_mid
     else:
-        mu = model_mean if model_mean is not None else nws_value
-    pts = vals + ([nws_value] if nws_value is not None else [])
+        mu = model_mid if model_mid is not None else nws_value
+    pts = kept + ([nws_value] if nws_value is not None else [])
     disagreement = statistics.pstdev(pts) if len(pts) > 1 else 0.0
     sigma = max(spread_floor(lead_days), 1.2 * disagreement)
     return mu, sigma
