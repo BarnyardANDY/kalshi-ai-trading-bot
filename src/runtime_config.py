@@ -69,6 +69,10 @@ SPEC: List[Dict[str, Any]] = [
     {"key": "MAX_POSITION_PCT", "label": "Max position size", "type": "float", "default": 3.0, "min": 0.5, "max": 20.0,
      "step": 0.5, "unit": "% of balance", "group": "Sizing & exits",
      "help": "Hard cap on any single bet as a share of your balance."},
+    {"key": "MAX_BETS_PER_EVENT", "label": "Max bets per event", "type": "int", "default": 2, "min": 0, "max": 20,
+     "step": 1, "unit": "bets", "group": "Sizing & exits",
+     "help": "Most positions held at once on one film / city-day / game. Its rungs all ride on one call "
+             "(Verity: 6 YES bets, one wrong opinion, -$11). 0 = no limit."},
     {"key": "HOLD_EXIT_MARGIN", "label": "Early-exit margin", "type": "float", "default": 0.05, "min": 0.0, "max": 0.5,
      "step": 0.01, "unit": "¢", "scale": 100, "group": "Sizing & exits",
      "help": "Positions hold to settlement unless the bid beats the bot's value by this much."},

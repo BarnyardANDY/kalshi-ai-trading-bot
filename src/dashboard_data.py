@@ -149,9 +149,22 @@ def recent_predictions(limit: int = 200) -> pd.DataFrame:
                                  "FROM predictions ORDER BY ts DESC LIMIT ?", (limit,))
     if df.empty:
         return df
-    df["time"] = pd.to_datetime(df["ts"], unit="s")
+    df["time"] = (pd.to_datetime(df["ts"], unit="s", utc=True)
+                  .dt.tz_convert(os.getenv("DASHBOARD_TZ", "America/New_York")).dt.tz_localize(None))
     df["result"] = df["outcome"].map({1: "YES", 0: "NO"}).fillna("pending")
     return df.drop(columns=["ts", "outcome"])
+
+
+def would_have_traded(min_gap: float = 0.10) -> pd.DataFrame:
+    from src import learning
+
+    rep = learning.would_have_traded(learning.load_rows(), min_gap)
+    rows = [{"niche": n, "bets": o["bets"], "events": o["events"], "win_rate": o["win_rate"],
+             "avg_price": o["avg_price"], "cents_per_contract": o["cents_per_contract"],
+             "dollars_per_contract_each": o["pnl"], "underdog_bets": o["underdog_bets"],
+             "underdog_cents": o["underdog_cents_per_contract"]}
+            for n, o in sorted(rep.items())]
+    return pd.DataFrame(rows)
 
 
 # ----------------------------------------------------------------------------
@@ -175,42 +188,73 @@ def ai_spend_today() -> Dict[str, Any]:
     return {"cost": cost, "requests": int(reqs), "limit": limit}
 
 
+_BOT_MARKERS = (b"BEAST MODE TRADING BOT STARTED", b"Trading Cycle")
+
+
+def _head_tail(path: str, n: int = 200_000) -> bytes:
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        head = f.read(min(n, size))
+        if size <= n:
+            return head
+        f.seek(max(n, size - n))
+        return head + b"\n" + f.read()
+
+
 def _bot_log(logs_dir: str = "logs") -> Optional[str]:
-    """Newest log file written by the trading loop (CLI commands also create logs)."""
+    """Newest log file written by the trading loop (CLI commands also create logs).
+
+    A busy cycle can write more than the tail we read, so the start-up banner
+    at the head of the file counts too.
+    """
     import glob
 
     files = sorted(glob.glob(os.path.join(logs_dir, "trading_system*.log")), key=os.path.getmtime, reverse=True)
-    for path in files[:8]:
+    for path in files[:12]:
         try:
-            with open(path, "rb") as f:
-                f.seek(max(0, os.path.getsize(path) - 200_000))
-                if b"Trading Cycle" in f.read():
-                    return path
+            text = _head_tail(path)
         except OSError:
             continue
+        if any(m in text for m in _BOT_MARKERS):
+            return path
     return None
 
 
-def bot_status(log_file: Optional[str] = None) -> Dict[str, Any]:
-    """Last activity time and trading mode, read from the bot's log."""
+def _last_prediction_ts() -> Optional[float]:
+    """Time of the bot's most recent prediction (written only by the running bot)."""
+    try:
+        from src import learning
+        df = _read(learning.DB_PATH, "SELECT MAX(ts) AS ts FROM predictions")
+        v = df["ts"].iloc[0] if not df.empty else None
+        return float(v) if v is not None and v == v else None
+    except Exception:
+        return None
+
+
+def bot_status(log_file: Optional[str] = None, prediction_ts: Optional[float] = None) -> Dict[str, Any]:
+    """Last activity time and trading mode, from the bot's log and its predictions."""
     out: Dict[str, Any] = {"last_activity": None, "minutes_ago": None, "mode": "unknown"}
     log_file = log_file or _bot_log()
-    if not log_file:
-        return out
-    try:
-        mtime = os.path.getmtime(log_file)
-    except OSError:
-        return out
-    out["last_activity"] = datetime.fromtimestamp(mtime)
-    out["minutes_ago"] = (datetime.now().timestamp() - mtime) / 60
-    try:
-        with open(log_file, "rb") as f:
-            f.seek(max(0, os.path.getsize(log_file) - 400_000))
-            tail = f.read().decode("utf-8", "ignore")
-        modes = re.findall(r"Live mode: (True|False)|live_mode=(True|False)", tail)
-        if modes:
-            last = modes[-1][0] or modes[-1][1]
-            out["mode"] = "LIVE" if last == "True" else "paper"
-    except OSError:
-        pass
+    stamps = []
+    if log_file:
+        try:
+            stamps.append(os.path.getmtime(log_file))
+        except OSError:
+            log_file = None
+    pts = prediction_ts if prediction_ts is not None else _last_prediction_ts()
+    if pts:
+        stamps.append(pts)
+    if stamps:
+        last = max(stamps)
+        out["last_activity"] = datetime.fromtimestamp(last)
+        out["minutes_ago"] = max(0.0, (datetime.now().timestamp() - last) / 60)
+    if log_file:
+        try:
+            text = _head_tail(log_file, 400_000).decode("utf-8", "ignore")
+            modes = re.findall(r"Trading Mode: (LIVE|PAPER)|Live mode: (True|False)|live_mode=(True|False)", text)
+            if modes:
+                last_mode = next(x for x in modes[-1] if x)
+                out["mode"] = "LIVE" if last_mode in ("LIVE", "True") else "paper"
+        except OSError:
+            pass
     return out

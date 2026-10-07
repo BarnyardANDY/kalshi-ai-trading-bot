@@ -8,7 +8,7 @@ former 1,300-line portfolio_optimization.py.
 import logging
 import numpy as np
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.utils.database import DatabaseManager, Market
 from src.clients.kalshi_client import KalshiClient
@@ -59,6 +59,21 @@ async def create_market_opportunities_from_markets(
             _t.is_exhausted = _t.total_cost >= _ai_cap
     if _paused:
         logger.info("⏸️  Trading paused from the dashboard: predicting and learning only, no new trades")
+
+    # One opinion per event: a film's score ladder or a city-day's temperature
+    # ranges all ride on the same call, so cap how many rungs we hold at once.
+    _max_per_event = int(_rc.get("MAX_BETS_PER_EVENT"))
+    _event_bets: Dict[str, int] = {}
+    if _max_per_event > 0 and db_manager is not None:
+        try:
+            import aiosqlite
+            async with aiosqlite.connect(db_manager.db_path) as _db:
+                async with _db.execute("SELECT market_id FROM positions WHERE status='open'") as _cur:
+                    for (_mid,) in await _cur.fetchall():
+                        _ev = _mid.rsplit("-", 1)[0]
+                        _event_bets[_ev] = _event_bets.get(_ev, 0) + 1
+        except Exception as e:
+            logger.warning(f"Could not count open positions per event: {e}")
 
     # Rotten Tomatoes ladders are priced once per film (see src/rt_model.py),
     # so they don't count against the per-market AI cap below.
@@ -283,7 +298,15 @@ async def create_market_opportunities_from_markets(
                     continue
             if _paused:
                 continue
+            _ev = market.market_id.rsplit("-", 1)[0]
+            if edge_result.passes_filter and _max_per_event > 0 and _event_bets.get(_ev, 0) >= _max_per_event:
+                logger.info(
+                    f"❌ EVENT LIMIT: {market.market_id} - already {_event_bets[_ev]} bet(s) on {_ev} "
+                    f"(max {_max_per_event}); these ride on one call, so no more rungs"
+                )
+                continue
             if edge_result.passes_filter:  # Must pass 10% edge filter
+                _event_bets[_ev] = _event_bets.get(_ev, 0) + 1
                 opportunity = MarketOpportunity(
                     market_id=market.market_id,
                     market_title=market.title,

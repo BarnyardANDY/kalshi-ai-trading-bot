@@ -1458,6 +1458,21 @@ def cmd_learning(args: argparse.Namespace) -> None:
             d = p.get("rt_drift")
             print(f"    score drift after prediction: {d:+.1f} pts" if d is not None
                   else "    score drift after prediction: not enough films yet")
+
+    from src import runtime_config
+    gap = float(runtime_config.get("MIN_EDGE"))
+    rep = learning.would_have_traded(learning.load_rows(), gap)
+    print("\n" + "=" * 70)
+    print(f"  IF YOU HAD FOLLOWED EVERY BOT BET (disagreement >= {100 * gap:.0f} pts, at market price,")
+    print("  after fees, held to settlement)")
+    print("=" * 70)
+    if not rep:
+        print("  No settled disagreements yet.")
+    for n, o in sorted(rep.items()):
+        u = o["underdog_cents_per_contract"]
+        print(f"  {n:16s} {o['bets']:4d} bets / {o['events']:3d} events   win {o['win_rate']:.0%}   "
+              f"{o['cents_per_contract']:+.1f} c/contract   ({o['pnl']:+.2f} $ at 1 contract each)"
+              + (f"   underdogs: {o['underdog_bets']} bets, {u:+.1f} c" if u is not None else ""))
     print()
 
 

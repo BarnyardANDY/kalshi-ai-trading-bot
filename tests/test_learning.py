@@ -94,3 +94,25 @@ def test_unsettled_markets_stay_open(tmp_path):
 def test_apply_blends_with_trust(monkeypatch):
     monkeypatch.setattr(L, "niche_params", lambda n: {"trust": 0.25, "paused": False})
     assert abs(L.apply("x", 0.9, 0.5) - 0.6) < 1e-9
+
+
+def test_would_have_traded_takes_first_disagreement_and_scores_after_fees():
+    from src import learning
+    # (market_id, event, niche, ts, our, mkt, outcome, thr, liked, not_liked)
+    rows = [
+        ("W-1", "W", "weather", 1, 0.50, 0.45, 0, None, None, None),   # gap 5: not a bet
+        ("W-1", "W", "weather", 2, 0.60, 0.40, 0, None, None, None),   # first bet: YES at 40, loses
+        ("W-1", "W", "weather", 3, 0.90, 0.40, 0, None, None, None),   # later: ignored
+        ("W-2", "W", "weather", 2, 0.10, 0.30, 0, None, None, None),   # NO at 70, wins
+        ("W-3", "W", "weather", 2, 0.30, 0.01, 1, None, None, None),   # 1c: no realistic fill
+    ]
+    rep = learning.would_have_traded(rows, 0.10)["weather"]
+    assert rep["bets"] == 2 and rep["wins"] == 1 and rep["events"] == 1
+    fee = 0.07 * 0.4 * 0.6 + 0.07 * 0.3 * 0.7
+    assert abs(rep["pnl"] - ((0 - 0.40) + (1 - 0.70) - fee)) < 1e-9
+    assert rep["underdog_bets"] == 0
+
+
+def test_would_have_traded_empty():
+    from src import learning
+    assert learning.would_have_traded([], 0.1) == {}

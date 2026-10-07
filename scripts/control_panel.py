@@ -55,6 +55,7 @@ def load_all():
         "positions": D.open_positions(),
         "learning": D.learning_summary(),
         "predictions": D.recent_predictions(),
+        "wht": D.would_have_traded(float(RC.get("MIN_EDGE"))),
         "ai": D.ai_spend_today(),
         "status": D.bot_status(),
     }
@@ -91,7 +92,7 @@ s1, s2, s3, s4 = st.columns(4)
 mins = status["minutes_ago"]
 if mins is None:
     s1.metric("Bot", "no log found")
-elif mins < 5:
+elif mins < 30:  # a full scan of every niche can take ~20 minutes
     s1.metric("Bot", "● running", f"active {mins:.0f} min ago", delta_color="off")
 else:
     s1.metric("Bot", "⚠ stalled?", f"last activity {mins:.0f} min ago", delta_color="off")
@@ -277,6 +278,32 @@ with tab_learn:
                 "market_brier": st.column_config.NumberColumn("market Brier", format="%.3f"),
                 "trust_in_bot": st.column_config.NumberColumn("trust in bot", format="percent"),
                 "rt_drift_pts": st.column_config.NumberColumn("RT drift (pts)", format="%+.1f"),
+            },
+        )
+
+    st.markdown("#### If you had followed every bot bet")
+    st.caption(f"Each settled market where the bot disagreed with the market by at least "
+               f"{100 * float(cfg['MIN_EDGE']):.0f} pts (your Min edge): buy the side the bot liked at the "
+               "market price, pay Kalshi's fee, hold to settlement. No other gates. Positive ¢/contract = "
+               "the bot's disagreements were right more often than the price implied; negative = the market "
+               "was right. 'Underdog' = bets at 25¢ or less, where the losses so far have come from.")
+    wht = data["wht"]
+    if wht.empty:
+        st.info("No settled disagreements yet.")
+    else:
+        st.dataframe(
+            wht.assign(niche=wht["niche"].map(lambda n: NICHE_LABELS.get(n, n))),
+            hide_index=True, use_container_width=True,
+            column_config={
+                "bets": st.column_config.NumberColumn("bets"),
+                "events": st.column_config.NumberColumn("events"),
+                "win_rate": st.column_config.NumberColumn("win rate", format="percent"),
+                "avg_price": st.column_config.NumberColumn("avg price paid", format="%.2f"),
+                "cents_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.1f"),
+                "dollars_per_contract_each": st.column_config.NumberColumn("$ if 1 contract each",
+                                                                           format="%+.2f"),
+                "underdog_bets": st.column_config.NumberColumn("underdog bets"),
+                "underdog_cents": st.column_config.NumberColumn("underdog ¢ / contract", format="%+.1f"),
             },
         )
 

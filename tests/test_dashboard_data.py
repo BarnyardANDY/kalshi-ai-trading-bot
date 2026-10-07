@@ -44,3 +44,16 @@ def test_trades_reads_db(tmp_path):
     df = D.trades(str(db))
     assert df.loc[0, "niche"] == "rotten_tomatoes" and bool(df.loc[0, "settled"])
     assert df.loc[0, "pnl_per_contract_c"] == 60.0
+
+
+def test_bot_status_uses_head_banner_and_recent_predictions(tmp_path):
+    import os
+    import time
+    log = tmp_path / "trading_system_20261002_094500.log"
+    log.write_text("x BEAST MODE TRADING BOT STARTED\nx Trading Mode: PAPER\n" + "noise\n" * 80_000)
+    old = time.time() - 3 * 3600
+    os.utime(log, (old, old))
+    assert D._bot_log(str(tmp_path)) == str(log)   # banner only in the head
+    st = D.bot_status(str(log), prediction_ts=time.time() - 120)
+    assert st["mode"] == "paper"
+    assert 1 < st["minutes_ago"] < 3                # recent prediction beats the old log time

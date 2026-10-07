@@ -285,6 +285,53 @@ def _rt_drift(rs: List[tuple], min_events: int) -> Optional[float]:
     return round(max(-10.0, min(10.0, sum(diffs) / len(diffs))), 1)
 
 
+def would_have_traded(rows: List[tuple], min_gap: float = 0.10) -> Dict[str, Dict[str, Any]]:
+    """What following the bot would have earned, per niche, ignoring every other gate.
+
+    For each settled market, take the FIRST prediction where the bot disagreed
+    with the market by at least ``min_gap`` (the moment it would first have
+    bet), buy the side the bot preferred at the market's midpoint, pay Kalshi's
+    fee, and hold to settlement. Real fills at the ask would be a little worse.
+    Answers the question the Brier score can't: on the bets the bot wants to
+    make, who turns out right - the bot or the market?
+    """
+    first: Dict[str, tuple] = {}
+    for r in sorted(rows, key=lambda r: r[3]):
+        mid, our, mkt = r[0], r[4], r[5]
+        if mid in first or our is None or mkt is None or abs(our - mkt) < min_gap:
+            continue
+        price = mkt if our > mkt else 1 - mkt
+        if not 0.03 <= price <= 0.97:
+            continue  # no realistic fill that close to 0 or 100
+        first[mid] = r
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in first.values():
+        niche, our, mkt, y = r[2], r[4], r[5], r[6]
+        yes = our > mkt
+        price = mkt if yes else 1 - mkt
+        won = (y == 1) if yes else (y == 0)
+        pnl = (1.0 if won else 0.0) - price - 0.07 * mkt * (1 - mkt)
+        o = out.setdefault(niche, {"bets": 0, "wins": 0, "pnl": 0.0, "price": 0.0, "events": set(),
+                                   "underdog_bets": 0, "underdog_pnl": 0.0})
+        o["bets"] += 1
+        o["wins"] += int(won)
+        o["pnl"] += pnl
+        o["price"] += price
+        o["events"].add(r[1])
+        if price <= 0.25:
+            o["underdog_bets"] += 1
+            o["underdog_pnl"] += pnl
+    for o in out.values():
+        n = o["bets"]
+        o["events"] = len(o["events"])
+        o["win_rate"] = o["wins"] / n
+        o["avg_price"] = o.pop("price") / n
+        o["cents_per_contract"] = 100 * o["pnl"] / n
+        u = o["underdog_bets"]
+        o["underdog_cents_per_contract"] = 100 * o["underdog_pnl"] / u if u else None
+    return out
+
+
 def load_rows(path: Optional[str] = None) -> List[tuple]:
     with closing(_conn(path)) as c:
         return c.execute(
