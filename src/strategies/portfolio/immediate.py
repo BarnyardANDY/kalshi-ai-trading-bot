@@ -8,6 +8,7 @@ former 1,300-line portfolio_optimization.py.
 import logging
 import numpy as np
 from datetime import datetime
+import time
 from typing import Dict, List, Optional, Tuple
 
 from src.utils.database import DatabaseManager, Market
@@ -20,6 +21,10 @@ from src.utils.market_prices import get_market_prices
 from src.utils.position_sizing import binary_market_payout_odds, kelly_fraction
 
 from src.strategies.portfolio.models import MarketOpportunity
+
+
+# market_id -> (time asked, market price then, probability, confidence)
+_AI_CACHE: Dict[str, Tuple[float, float, float, float]] = {}
 
 
 async def create_market_opportunities_from_markets(
@@ -199,10 +204,19 @@ async def create_market_opportunities_from_markets(
                     research = await build_research_context(_niche.name, market_info)
                     logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
 
-                # Get REAL AI prediction using fast analysis
-                predicted_prob, confidence = await _get_fast_ai_prediction(
-                    market, xai_client, market_prob, research
-                )
+                # Get REAL AI prediction using fast analysis. Reuse a recent
+                # answer while the price hasn't moved much: re-asking every
+                # cycle (~20 min) costs money and the news rarely changes that fast.
+                _hit = _AI_CACHE.get(market.market_id)
+                _ttl = 60 * float(_rc.get("AI_REPRICE_MINUTES"))
+                if _hit and time.time() - _hit[0] < _ttl and abs(_hit[1] - market_prob) < 0.05:
+                    predicted_prob, confidence = _hit[2], _hit[3]
+                else:
+                    predicted_prob, confidence = await _get_fast_ai_prediction(
+                        market, xai_client, market_prob, research
+                    )
+                    if predicted_prob is not None and confidence is not None:
+                        _AI_CACHE[market.market_id] = (time.time(), market_prob, predicted_prob, confidence)
             
             # If AI analysis failed, skip this market
             if predicted_prob is None or confidence is None:
@@ -252,7 +266,6 @@ async def create_market_opportunities_from_markets(
             # Time to expiry
             time_to_expiry = 30.0  # Default 30 days
             if hasattr(market, 'expiration_ts') and market.expiration_ts:
-                import time
                 time_to_expiry = (market.expiration_ts - time.time()) / 86400
                 time_to_expiry = max(0.1, time_to_expiry)
             

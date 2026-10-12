@@ -86,6 +86,10 @@ SPEC: List[Dict[str, Any]] = [
     {"key": "RT_REPRICE_MINUTES", "label": "RT: re-price every", "type": "int", "default": 60, "min": 5, "max": 1440,
      "step": 5, "unit": "min", "group": "Niche settings",
      "help": "Re-ask the AI about a film at most this often unless new reviews land."},
+    {"key": "AI_REPRICE_MINUTES", "label": "Trump: re-ask AI every", "type": "int", "default": 60, "min": 0,
+     "max": 1440, "step": 5, "unit": "min", "group": "Niche settings",
+     "help": "Reuse a market's AI answer for this long unless its price moves 5+ pts. Each cycle is ~20 min, "
+             "so 60 cuts AI cost by about two thirds. 0 = ask every cycle."},
     {"key": "SPORTS_LEAGUES", "label": "Sports: leagues", "type": "multi", "options": ALL_LEAGUES,
      "default": "nfl,ncaaf", "group": "Niche settings",
      "help": "Leagues compared with sportsbook odds. Each costs ~1 Odds API request per refresh "

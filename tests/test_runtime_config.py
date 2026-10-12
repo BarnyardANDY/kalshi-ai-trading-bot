@@ -55,3 +55,8 @@ def test_corrupt_file_keeps_last_good(monkeypatch):
         f.write("{not json")
     os.utime(RC.PATH, (time.time() + 5, time.time() + 5))
     assert RC.get("MIN_EDGE") == 0.12
+
+
+def test_ai_reprice_minutes_default():
+    from src import runtime_config
+    assert runtime_config.get("AI_REPRICE_MINUTES") == 60
