@@ -247,7 +247,7 @@ async def create_market_opportunities_from_markets(
                         )
                     if _mn.name in _shadow:
                         continue  # shadow niche: recorded and graded, never traded
-                    if _lp.get("paused"):
+                    if _lp.get("paused") and not learning.overridden(_mn.name):
                         logger.info(
                             f"🧠 {_mn.name} paused: its settled record isn't beating the market "
                             f"(shadow mode, still learning). Skipping {market.market_id}"
@@ -293,6 +293,12 @@ async def create_market_opportunities_from_markets(
                 continue
             if edge_result.passes_filter and _net is not None:
                 _side_ask = _costs["yes_ask"] if _net_side == "YES" else _costs["no_ask"]
+                if _mn and _mn.name == "stocks" and _side_ask < float(_rc.get("STOCKS_MIN_SIDE_PRICE")):
+                    logger.info(
+                        f"❌ STOCKS LONG SHOT: {market.market_id} - {_net_side} at {_side_ask:.0%} is under "
+                        f"{float(_rc.get('STOCKS_MIN_SIDE_PRICE')):.0%}; the record shows these lose"
+                    )
+                    continue
                 if 0 < _side_ask <= 1 - _fav_px and _net < _min_edge + _fav_extra:
                     logger.info(
                         f"❌ FIGHTING A FAVORITE: {market.market_id} - buying {_net_side} at {_side_ask:.0%} "

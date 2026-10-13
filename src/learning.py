@@ -365,8 +365,20 @@ def niche_params(niche: str) -> Dict[str, Any]:
     }
 
 
+def overridden(niche: str) -> bool:
+    """True if the dashboard says to trade this niche on the bot's own view,
+    ignoring the learned trust and auto-pause (a deliberate paper test)."""
+    try:
+        from src import runtime_config
+        return niche in {x for x in str(runtime_config.get("TRADE_DESPITE_PAUSE")).split(",") if x}
+    except Exception:
+        return False
+
+
 def apply(niche: str, our_prob: float, market_prob: float) -> float:
     """Blend the bot's estimate with the market using the learned trust."""
+    if overridden(niche):
+        return our_prob
     t = niche_params(niche)["trust"]
     return t * our_prob + (1 - t) * market_prob
 

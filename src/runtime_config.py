@@ -30,6 +30,10 @@ SPEC: List[Dict[str, Any]] = [
      "group": "Master", "help": "Which market groups the bot scans. New niches appear within ~5 minutes."},
     {"key": "SHADOW_NICHES", "label": "Shadow-only niches", "type": "niches", "default": "sports,stocks", "group": "Master",
      "help": "Niches that predict and get graded but never trade, until you're convinced by their record."},
+    {"key": "TRADE_DESPITE_PAUSE", "label": "Trade despite auto-pause", "type": "niches", "default": "",
+     "group": "Master",
+     "help": "Paper-test these niches on the bot's own view: ignore the learned trust and auto-pause. "
+             "Every other safety rule still applies. Leave empty normally."},
 
     {"key": "MIN_EDGE", "label": "Min edge", "type": "float", "default": 0.10, "min": 0.0, "max": 0.5,
      "step": 0.01, "unit": "pts", "scale": 100, "group": "Signal gates",
@@ -102,6 +106,10 @@ SPEC: List[Dict[str, Any]] = [
      "min": 0.5, "max": 1.5, "step": 0.05, "unit": "x", "group": "Niche settings",
      "help": "Scales the VIX/VXN used to price index ranges. Options usually overstate actual moves a little; "
              "the learning record will show whether a lower value fits better."},
+    {"key": "STOCKS_MIN_SIDE_PRICE", "label": "Stocks: skip bets under", "type": "float", "default": 0.25,
+     "min": 0.0, "max": 0.9, "step": 0.01, "unit": "¢", "scale": 100, "group": "Niche settings",
+     "help": "Don't buy a stock-index contract cheaper than this. The record shows the bot's cheap "
+             "long-shot stock bets lose. 0 = off."},
     {"key": "DAILY_AI_COST_LIMIT", "label": "Daily AI budget", "type": "float", "default": 2.0, "min": 0.0,
      "max": 50.0, "step": 0.5, "unit": "$", "group": "Niche settings",
      "help": "AI spend cap per day (Rotten Tomatoes + Trump). Weather uses no AI."},
