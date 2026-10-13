@@ -196,14 +196,6 @@ async def create_market_opportunities_from_markets(
                 # Already priced as part of its film's ladder / city-day forecast.
                 predicted_prob, confidence = rt_predictions[market.market_id]
             else:
-                # Niche markets get fresh research (RT scores, news) in the prompt
-                research = ""
-                _niche = niche_for_ticker(market.market_id, _enabled) if _enabled else None
-                if _niche:
-                    from src.niche_research import build_research_context
-                    research = await build_research_context(_niche.name, market_info)
-                    logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
-
                 # Get REAL AI prediction using fast analysis. Reuse a recent
                 # answer while the price hasn't moved much: re-asking every
                 # cycle (~20 min) costs money and the news rarely changes that fast.
@@ -212,6 +204,13 @@ async def create_market_opportunities_from_markets(
                 if _hit and time.time() - _hit[0] < _ttl and abs(_hit[1] - market_prob) < 0.05:
                     predicted_prob, confidence = _hit[2], _hit[3]
                 else:
+                    # Niche markets get fresh research (RT scores, news) in the prompt
+                    research = ""
+                    _niche = niche_for_ticker(market.market_id, _enabled) if _enabled else None
+                    if _niche:
+                        from src.niche_research import build_research_context
+                        research = await build_research_context(_niche.name, market_info)
+                        logger.info(f"Research for {market.market_id} ({_niche.name}):\n{research}")
                     predicted_prob, confidence = await _get_fast_ai_prediction(
                         market, xai_client, market_prob, research
                     )

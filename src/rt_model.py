@@ -127,6 +127,9 @@ def _parse_ai(text: Optional[str], thresholds: List[int]) -> Tuple[Optional[Dict
     return probs, conf
 
 
+RT_NEW_REVIEWS_TO_REPRICE = 5  # ask the AI again early only after this many new reviews
+
+
 async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict[str, Prediction]:
     """Coherent (probability, confidence) for every RT ladder market given.
 
@@ -181,13 +184,12 @@ async def predict_rt_ladders(markets, xai_client, kalshi_client, logger) -> Dict
         cached = _LADDER_CACHE.get(event)
         if (
             cached
-            and cached[1] == liked
-            and cached[2] == not_liked
+            and (liked + not_liked) - (cached[1] + cached[2]) < RT_NEW_REVIEWS_TO_REPRICE
             and set(thresholds) <= set(cached[4])
             and time.time() - cached[0] < rt_reprice_minutes() * 60
         ):
-            # Same reviews as last time: reuse the view instead of paying for
-            # another AI call every cycle.
+            # Barely any new reviews since last time: reuse the view instead of
+            # paying for another AI call every cycle (one review rarely moves it).
             for t, mk in rungs:
                 out[mk.market_id] = (cached[4][t], cached[5])
             continue

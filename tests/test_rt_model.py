@@ -111,6 +111,9 @@ def test_reuses_view_until_reviews_change(monkeypatch):
     R._cache.clear()
     asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
     assert len(calls) == 1            # same reviews -> cached
-    _patch_rt(monkeypatch, 31, 20)    # a new review lands
+    _patch_rt(monkeypatch, 31, 20)    # one new review: not worth an AI call
+    asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
+    assert len(calls) == 1
+    _patch_rt(monkeypatch, 33, 22)    # 5 new reviews since the last AI view -> ask again
     asyncio.run(M.predict_rt_ladders(ms, AI(), FakeKalshi(), Log()))
     assert len(calls) == 2

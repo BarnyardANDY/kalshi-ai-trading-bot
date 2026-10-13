@@ -85,7 +85,7 @@ SPEC: List[Dict[str, Any]] = [
      "help": "Don't trade a film until Rotten Tomatoes shows this many critic reviews."},
     {"key": "RT_REPRICE_MINUTES", "label": "RT: re-price every", "type": "int", "default": 60, "min": 5, "max": 1440,
      "step": 5, "unit": "min", "group": "Niche settings",
-     "help": "Re-ask the AI about a film at most this often unless new reviews land."},
+     "help": "Re-ask the AI about a film at most this often, or sooner once 5+ new reviews land."},
     {"key": "AI_REPRICE_MINUTES", "label": "Trump: re-ask AI every", "type": "int", "default": 60, "min": 0,
      "max": 1440, "step": 5, "unit": "min", "group": "Niche settings",
      "help": "Reuse a market's AI answer for this long unless its price moves 5+ pts. Each cycle is ~20 min, "
