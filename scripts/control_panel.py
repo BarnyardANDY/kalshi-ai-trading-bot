@@ -58,6 +58,7 @@ def load_all():
         "wht": D.would_have_traded(float(RC.get("MIN_EDGE"))),
         "ai": D.ai_spend_today(),
         "status": D.bot_status(),
+        "maker": D.maker_data(),
     }
 
 
@@ -102,8 +103,8 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Strategy controls", "Open positions", "Learning", "Predictions"])
+tab_perf, tab_maker, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Strategy controls", "Open positions", "Learning", "Predictions"])
 
 # ----------------------------------------------------------------------------
 # Performance
@@ -326,3 +327,57 @@ with tab_pred:
                 "confidence": st.column_config.NumberColumn(format="percent"),
             },
         )
+
+# ----------------------------------------------------------------------------
+# Maker test
+# ----------------------------------------------------------------------------
+with tab_maker:
+    st.caption("Patient favorite buyer (paper only). Posts buy orders at the bid on the favorite side (55-95c) "
+               "of markets settling within 2 days and waits for a seller. An order only counts as filled if "
+               "Kalshi's public trade tape shows someone actually sold at or below our price after we posted, "
+               "past the queue ahead of us. Held to settlement; maker fee charged on every fill. "
+               "Runs as its own process: tmux session 'maker'.")
+    mk = data["maker"]
+    rep = mk["report"]
+    if not rep or not rep["posted"]:
+        st.info("No maker orders yet. Start it on the server: tmux session 'maker' running `python cli.py maker`.")
+    else:
+        a, b, cc, d, e, f = st.columns(6)
+        a.metric("Orders posted", rep["posted"], f"{rep['open']} resting now", delta_color="off")
+        b.metric("Filled", rep["filled"], f"{rep['fill_rate']:.0%} of finished orders", delta_color="off")
+        cc.metric("Settled", rep["settled"], f"{rep['awaiting']} awaiting result", delta_color="off")
+        d.metric("Win rate", f"{rep['win_rate']:.0%}" if rep["win_rate"] is not None else "–",
+                 f"avg price {rep['avg_price']:.2f}" if rep["avg_price"] else None, delta_color="off")
+        e.metric("¢ / contract", f"{rep['c_per_contract']:+.2f}¢" if rep["c_per_contract"] is not None else "–",
+                 f"{rep['return_on_cost']:+.1%} on money spent" if rep["return_on_cost"] is not None else None,
+                 delta_color="off")
+        f.metric("Total P&L", money(rep["pnl"]), f"{rep['events']} events", delta_color="off")
+        st.caption("Judge it on ¢/contract after ~200 settled fills across many events. Positive and steady = "
+                   "an edge worth considering; around zero or negative = no edge. Win rate alone means little: "
+                   "buying 80c favorites should win ~80% just to break even.")
+        bk = pd.DataFrame(rep["buckets"])
+        bk = bk[bk["settled"] > 0]
+        if not bk.empty:
+            st.markdown("#### By price paid")
+            st.dataframe(bk, hide_index=True, use_container_width=True,
+                         column_config={"win rate": st.column_config.NumberColumn(format="percent"),
+                                        "avg price": st.column_config.NumberColumn(format="%.2f"),
+                                        "c_per_contract": st.column_config.NumberColumn("¢ / contract",
+                                                                                        format="%+.2f"),
+                                        "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+        od = mk["orders"]
+        settled = od[od["status"] == "settled"].sort_values("settled", ascending=False)
+        if not settled.empty:
+            sp = settled.assign(cum=settled.sort_values("settled")["pnl"].cumsum())
+            fig = go.Figure(go.Scatter(x=sp.sort_values("settled")["settled"], y=sp.sort_values("settled")["cum"],
+                                       mode="lines", line=dict(width=2)))
+            st.markdown("#### Equity (settled maker fills)")
+            st.plotly_chart(chart_layout(fig, 260), use_container_width=True)
+        st.markdown("#### Orders")
+        show = od.sort_values("posted_ts", ascending=False)[
+            ["posted", "status", "ticker", "title", "side", "price", "qty", "queue_ahead", "fill", "result", "pnl",
+             "note"]].head(300)
+        st.dataframe(show, hide_index=True, use_container_width=True,
+                     column_config={"price": st.column_config.NumberColumn(format="%.2f"),
+                                    "queue_ahead": st.column_config.NumberColumn("queue ahead", format="%.0f"),
+                                    "pnl": st.column_config.NumberColumn("P&L", format="dollar")})

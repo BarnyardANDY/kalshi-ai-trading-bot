@@ -1476,6 +1476,58 @@ def cmd_learning(args: argparse.Namespace) -> None:
     print()
 
 
+def cmd_maker(args: argparse.Namespace) -> None:
+    """Maker test (paper only): patient favorite buyer. See src/maker.py."""
+    from src import maker
+
+    if args.report:
+        rep = maker.report(maker.rows())
+        print("=" * 70)
+        print("  MAKER TEST (paper): patient favorite buyer")
+        print("=" * 70)
+        print(f"  orders posted {rep['posted']}, resting now {rep['open']}, filled {rep['filled']} "
+              f"(fill rate {rep['fill_rate']:.0%}), settled {rep['settled']}, awaiting result {rep['awaiting']}")
+        if rep["settled"]:
+            print(f"  settled: {rep['contracts']} contracts across {rep['events']} events, win rate "
+                  f"{rep['win_rate']:.0%}, avg price {rep['avg_price']:.2f}")
+            print(f"  P&L {rep['pnl']:+.2f} $  =  {rep['c_per_contract']:+.2f} c/contract  "
+                  f"({rep['return_on_cost']:+.1%} on money spent), after maker fees")
+            for b in rep["buckets"]:
+                if b["settled"]:
+                    print(f"    {b['price range']:>8}: {b['settled']:4d} settled, win {b['win rate']:.0%}, "
+                          f"{b['c_per_contract']:+.2f} c/contract")
+        print()
+        return
+
+    # Own log file (logs/maker.log), so it never mixes with the trading bot's logs.
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("maker")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/maker.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    if args.once:
+        from src.clients.kalshi_client import KalshiClient
+
+        async def _once():
+            client = KalshiClient()
+            try:
+                return await maker.run_cycle(client, logger)
+            finally:
+                await client.close()
+        print(asyncio.run(_once()))
+        return
+    print("Maker test running (paper only; no real orders are ever sent). Ctrl+C to stop.")
+    try:
+        asyncio.run(maker.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nMaker test stopped.")
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -2009,6 +2061,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_learn2.add_argument("--settle", action="store_true", help="Check Kalshi for new results first")
     p_learn2.set_defaults(func=cmd_learning)
+
+    # --- maker ---
+    p_mk = subparsers.add_parser(
+        "maker",
+        help="Run the maker test: patient favorite buyer (paper only, never places real orders)",
+        description="Post paper buy orders at the bid on favorites (55-95c) in markets settling within 2 days, "
+                    "fill them only when Kalshi's public trade tape shows a real seller reached our price, hold "
+                    "to settlement. Settings live in the dashboard's Strategy controls -> Maker test.",
+    )
+    p_mk.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_mk.add_argument("--once", action="store_true", help="Run one cycle, print what it did, and exit")
+    p_mk.set_defaults(func=cmd_maker)
 
     # --- health ---
     p_health = subparsers.add_parser(
