@@ -373,6 +373,34 @@ with tab_maker:
                                        mode="lines", line=dict(width=2)))
             st.markdown("#### Equity (settled maker fills)")
             st.plotly_chart(chart_layout(fig, 260), use_container_width=True)
+        # ---- slice and dice ----------------------------------------------------
+        from src import maker_analysis as MA
+        feats = mk["features"]
+        st.markdown("#### Slice the results")
+        st.caption("Pick a way to split the settled bets. Each row says whether that group is clearly making "
+                   "money, clearly losing, or still too noisy to tell (the ± margin shrinks as more events "
+                   "settle). Look for a group that stays 'clearly positive' as data piles up.")
+        dim_label = st.selectbox("Split by", list(MA.DIMENSIONS), index=0, key="maker_dim")
+        tbl = MA.slice_table(feats, MA.DIMENSIONS[dim_label])
+        if tbl.empty:
+            st.info("No settled bets yet.")
+        else:
+            st.dataframe(tbl, hide_index=True, use_container_width=True,
+                         column_config={"win rate": st.column_config.NumberColumn(format="percent"),
+                                        "avg price": st.column_config.NumberColumn(format="%.2f"),
+                                        "c_per_contract": st.column_config.NumberColumn("¢ / contract",
+                                                                                        format="%+.2f"),
+                                        "margin": st.column_config.NumberColumn("± margin (¢)", format="%.1f"),
+                                        "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+            top = tbl.head(15)
+            fig = go.Figure(go.Bar(x=top["group"].astype(str), y=top["c_per_contract"],
+                                   error_y=dict(type="data", array=top["margin"], visible=True),
+                                   marker_color=["#2ecc71" if v > 0 else "#e74c3c" for v in top["c_per_contract"]]))
+            st.plotly_chart(chart_layout(fig, 280), use_container_width=True)
+        if not feats.empty:
+            st.download_button("Download every order (CSV)", feats.to_csv(index=False).encode(),
+                               file_name="maker_orders.csv", mime="text/csv")
+
         st.markdown("#### Orders")
         show = od.sort_values("posted_ts", ascending=False)[
             ["posted", "status", "ticker", "title", "side", "price", "qty", "queue_ahead", "fill", "result", "pnl",

@@ -230,3 +230,4 @@ data/learning.db
 data/learned_params.json
 data/runtime_config.json
 data/maker.db
+data/maker_export.csv

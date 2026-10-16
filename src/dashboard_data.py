@@ -172,7 +172,7 @@ def maker_data() -> Dict[str, Any]:
     from src import maker
 
     if not os.path.exists(maker.DB_PATH):
-        return {"report": None, "orders": pd.DataFrame()}
+        return {"report": None, "orders": pd.DataFrame(), "features": pd.DataFrame()}
     rows = maker.rows()
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -180,7 +180,9 @@ def maker_data() -> Dict[str, Any]:
         for col in ("posted_ts", "fill_ts", "close_ts", "settled_ts"):
             df[col.replace("_ts", "")] = (pd.to_datetime(df[col], unit="s", utc=True, errors="coerce")
                                           .dt.tz_convert(tz).dt.tz_localize(None))
-    return {"report": maker.report(rows), "orders": df}
+    from src import maker_analysis
+    feats = maker_analysis.features(rows, maker.series_meta())
+    return {"report": maker.report(rows), "orders": df, "features": feats}
 
 
 # ----------------------------------------------------------------------------

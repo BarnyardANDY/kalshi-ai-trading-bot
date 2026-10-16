@@ -1480,6 +1480,13 @@ def cmd_maker(args: argparse.Namespace) -> None:
     """Maker test (paper only): patient favorite buyer. See src/maker.py."""
     from src import maker
 
+    if getattr(args, "export", False):
+        from src import maker_analysis
+        df = maker_analysis.features(maker.rows(), maker.series_meta())
+        out = maker_analysis.export_csv(df, "data/maker_export.csv")
+        print(f"Wrote {len(df)} orders to {out}")
+        return
+
     if args.report:
         rep = maker.report(maker.rows())
         print("=" * 70)
@@ -2072,6 +2079,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_mk.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_mk.add_argument("--once", action="store_true", help="Run one cycle, print what it did, and exit")
+    p_mk.add_argument("--export", action="store_true", help="Write every order with its labels to data/maker_export.csv")
     p_mk.set_defaults(func=cmd_maker)
 
     # --- health ---

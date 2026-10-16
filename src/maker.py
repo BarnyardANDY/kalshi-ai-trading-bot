@@ -154,7 +154,31 @@ def quote_for(m: Dict[str, Any], cfg: Dict[str, Any], now: Optional[float] = Non
     return {"ticker": t, "event": m.get("event_ticker") or t.rsplit("-", 1)[0], "series": series_of(t),
             "side": side, "price": price, "improved": improve, "spread": spread, "close_ts": close,
             "title": " — ".join(x for x in (m.get("title"), m.get("yes_sub_title")) if x)[:200],
-            "volume_24h": volume_24h(m)}
+            "volume_24h": volume_24h(m), **snapshot(m, side)}
+
+
+def snapshot(m: Dict[str, Any], side: str) -> Dict[str, Any]:
+    """Market state when we posted, kept for slicing results later."""
+    q = quotes(m)
+    bid, ask = (q["yes_bid"], q["yes_ask"]) if side == "yes" else (q["no_bid"], q["no_ask"])
+    last = _num(m, "last_price_dollars", cents=("last_price",))
+    prev = _num(m, "previous_price_dollars", cents=("previous_price",))
+    if side == "no":
+        last = 1 - last if last else 0.0
+        prev = 1 - prev if prev else 0.0
+    return {"yes_bid": q["yes_bid"], "yes_ask": q["yes_ask"],
+            "side_mid_post": round((bid + ask) / 2, 4) if bid > 0 and ask > 0 else None,
+            "side_last": last or None, "side_prev_day": prev or None,
+            "open_interest": _num(m, "open_interest_fp", "open_interest") or None,
+            "liquidity": _num(m, "liquidity_dollars", cents=("liquidity",)) or None,
+            "expected_exp_ts": ts_of(m.get("expected_expiration_time")),
+            "open_ts": ts_of(m.get("open_time"))}
+
+
+def side_mid(m: Dict[str, Any], side: str) -> Optional[float]:
+    q = quotes(m)
+    bid, ask = (q["yes_bid"], q["yes_ask"]) if side == "yes" else (q["no_bid"], q["no_ask"])
+    return round((bid + ask) / 2, 4) if bid > 0 and ask > 0 else None
 
 
 def _book_levels(orderbook: Dict[str, Any], side: str) -> Optional[List[Tuple[float, float]]]:
@@ -215,7 +239,7 @@ def check_fill(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: i
 
 
 def fill_detail(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: int,
-                ahead: float, posted_ts: float, ticker: Optional[str] = None) -> Optional[Tuple[float, str]]:
+                ahead: float, posted_ts: float, ticker: Optional[str] = None) -> Optional[Tuple[float, str, str, float]]:
     """Timestamp at which a resting buy would have filled, or None.
 
     Fills if someone sold our side BELOW our price after we posted (they'd have
@@ -234,11 +258,11 @@ def fill_detail(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: 
             continue
         n = _num(tr, "count_fp", "count")
         if p < price - 0.0005:
-            return t, f"sold through at {p:.2f}"
+            return t, f"sold through at {p:.2f}", "through", p
         if abs(p - price) < 0.0005:
             at_price += n
             if at_price >= ahead + qty:
-                return t, f"{at_price:.0f} sold at our price ({ahead:.0f} ahead)"
+                return t, f"{at_price:.0f} sold at our price ({ahead:.0f} ahead)", "queue", p
     return None
 
 
@@ -269,7 +293,23 @@ def _conn(path: Optional[str] = None) -> sqlite3.Connection:
         posted_ts REAL, close_ts REAL, status TEXT,           -- open / filled / cancelled / settled
         fill_ts REAL, fee REAL, result TEXT, pnl REAL, settled_ts REAL, note TEXT)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)")
+    have = {r[1] for r in c.execute("PRAGMA table_info(orders)")}
+    for col, typ in EXTRA_COLUMNS:
+        if col not in have:
+            c.execute(f"ALTER TABLE orders ADD COLUMN {col} {typ}")
+    c.execute("""CREATE TABLE IF NOT EXISTS series_meta (series TEXT PRIMARY KEY, category TEXT,
+                 title TEXT, fetched_ts REAL)""")
     return c
+
+
+# Extra facts kept per order for slicing results (added to older databases automatically).
+EXTRA_COLUMNS = [
+    ("yes_bid", "REAL"), ("yes_ask", "REAL"), ("side_mid_post", "REAL"), ("side_last", "REAL"),
+    ("side_prev_day", "REAL"), ("volume_24h", "REAL"), ("open_interest", "REAL"), ("liquidity", "REAL"),
+    ("expected_exp_ts", "REAL"), ("open_ts", "REAL"),
+    ("fill_kind", "TEXT"), ("fill_trade_price", "REAL"),
+    ("mid_5m", "REAL"), ("mid_30m", "REAL"),   # our side's midpoint 5 / 30 min after the fill
+]
 
 
 def rows(status: Optional[str] = None, path: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -279,13 +319,24 @@ def rows(status: Optional[str] = None, path: Optional[str] = None) -> List[Dict[
         return [dict(r) for r in c.execute(q, (status,) if status else ())]
 
 
+_SNAPSHOT_KEYS = ("yes_bid", "yes_ask", "side_mid_post", "side_last", "side_prev_day", "volume_24h",
+                  "open_interest", "liquidity", "expected_exp_ts", "open_ts")
+
+
 def _insert(o: Dict[str, Any], ahead: float, now: float, path: Optional[str] = None) -> None:
+    extra = [k for k in _SNAPSHOT_KEYS if k in o]
+    cols = ["ticker", "event", "series", "title", "side", "price", "qty", "queue_ahead", "improved", "spread",
+            "posted_ts", "close_ts", "status", *extra]
+    vals = [o["ticker"], o["event"], o["series"], o["title"], o["side"], o["price"], o["qty"], ahead,
+            int(o["improved"]), o["spread"], now, o["close_ts"], "open", *[o[k] for k in extra]]
     with closing(_conn(path)) as c:
-        c.execute("""INSERT INTO orders (ticker, event, series, title, side, price, qty, queue_ahead,
-                     improved, spread, posted_ts, close_ts, status) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'open')""",
-                  (o["ticker"], o["event"], o["series"], o["title"], o["side"], o["price"], o["qty"],
-                   ahead, int(o["improved"]), o["spread"], now, o["close_ts"]))
+        c.execute(f"INSERT INTO orders ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", vals)
         c.commit()
+
+
+def series_meta(path: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+    with closing(_conn(path)) as c:
+        return {r[0]: {"category": r[1], "title": r[2]} for r in c.execute("SELECT series, category, title FROM series_meta")}
 
 
 def _update(oid: int, path: Optional[str] = None, **fields) -> None:
@@ -392,7 +443,8 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
         t = fd[0] if fd else None
         if t is not None and t <= min(now, r["close_ts"] or now):
             fee = maker_fee(r["price"], r["qty"])
-            _update(r["id"], path, status="filled", fill_ts=t, fee=fee, note=fd[1])
+            _update(r["id"], path, status="filled", fill_ts=t, fee=fee, note=fd[1], fill_kind=fd[2],
+                    fill_trade_price=fd[3])
             stats["filled"] += 1
             if logger:
                 logger.info(f"MAKER FILL {r['ticker']} {r['side'].upper()} {r['qty']} @ {r['price']:.2f}")
@@ -426,6 +478,12 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
             if logger:
                 logger.info(f"MAKER SETTLED {r['ticker']} {r['side'].upper()} result={m.get('result')} "
                             f"pnl={pnl:+.2f}")
+
+    # 2b. Mark-outs: where our side's price stood 5 and 30 minutes after each fill.
+    # Falling right after we buy = we were picked off by better-informed sellers.
+    await _markouts(client, now, path, logger)
+    # 2c. Category of each series we trade (looked up once per series).
+    await _series_categories(client, now, path)
 
     # 3. Fresh market view
     if universe is None:
@@ -493,6 +551,51 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
             logger.info(f"MAKER POST {q['ticker']} {q['side'].upper()} {q['qty']} @ {q['price']:.2f} "
                         f"(spread {q['spread']*100:.0f}c, {ahead:.0f} ahead) {q['title'][:70]}")
     return stats
+
+
+async def _markouts(client, now: float, path: Optional[str], logger=None) -> None:
+    jobs = []
+    for r in rows(path=path):
+        if not r.get("fill_ts"):
+            continue
+        for col, lag in (("mid_5m", 300), ("mid_30m", 1800)):
+            if r.get(col) is None and r["fill_ts"] + lag <= now < r["fill_ts"] + lag + 3600:
+                jobs.append((r, col))
+    for i in range(0, len(jobs), 50):
+        batch = jobs[i:i + 50]
+        try:
+            resp = await client.get_markets(limit=100, tickers=sorted({r["ticker"] for r, _ in batch}))
+            got = {m.get("ticker"): m for m in resp.get("markets") or []}
+        except Exception as e:
+            if logger:
+                logger.warning(f"MAKER markout lookup failed: {e}")
+            continue
+        for r, col in batch:
+            m = got.get(r["ticker"])
+            if not m:
+                continue
+            res = (m.get("result") or "").lower()
+            if res in ("yes", "no"):
+                val = 1.0 if res == r["side"] else 0.0       # already decided
+            else:
+                val = side_mid(m, r["side"])
+            if val is not None:
+                _update(r["id"], path, **{col: val})
+
+
+async def _series_categories(client, now: float, path: Optional[str], per_cycle: int = 10) -> None:
+    known = series_meta(path)
+    todo = sorted({r["series"] for r in rows(path=path)} - set(known))[:per_cycle]
+    for sr in todo:
+        try:
+            resp = await client._make_authenticated_request("GET", f"/trade-api/v2/series/{sr}", require_auth=False)
+            info = resp.get("series") or {}
+        except Exception:
+            info = {}
+        with closing(_conn(path)) as c:
+            c.execute("INSERT OR REPLACE INTO series_meta VALUES (?,?,?,?)",
+                      (sr, info.get("category") or "Unknown", info.get("title") or "", now))
+            c.commit()
 
 
 # ----------------------------------------------------------------------------
