@@ -55,9 +55,12 @@ def test_quote_filters():
     assert MK.quote_for(mkt(yb=0.51, ya=0.53), CFG, NOW) is None      # coin flip: below min price
 
 
-def test_queue_ahead_both_formats():
+def test_queue_ahead_formats():
     assert MK.queue_ahead({"orderbook": {"yes_dollars": [["0.69", 50], ["0.70", 120]]}}, "yes", 0.70) == 120
     assert MK.queue_ahead({"orderbook": {"no": [[29, 7], [30, 40]]}}, "no", 0.30) == 40
+    assert MK.queue_ahead({"orderbook_fp": {"yes_dollars": [["0.70", "35.00"]]}}, "yes", 0.70) == 35
+    assert MK.queue_ahead({"orderbook": {"yes": None, "no": [[30, 4]]}}, "yes", 0.70) == 0   # empty side
+    assert MK.queue_ahead({"something_else": {}}, "yes", 0.70) is None                       # unknown: skip
 
 
 def tr(ts, taker, yes_price, count):

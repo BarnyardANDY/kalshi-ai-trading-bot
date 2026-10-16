@@ -157,26 +157,41 @@ def quote_for(m: Dict[str, Any], cfg: Dict[str, Any], now: Optional[float] = Non
             "volume_24h": volume_24h(m)}
 
 
-def queue_ahead(orderbook: Dict[str, Any], side: str, price: float) -> float:
-    """Contracts already bidding at ``price`` on ``side`` (they fill before us)."""
-    ob = orderbook.get("orderbook", orderbook) or {}
-    levels = ob.get(f"{side}_dollars")
-    total = 0.0
-    if levels:
+def _book_levels(orderbook: Dict[str, Any], side: str) -> Optional[List[Tuple[float, float]]]:
+    """(price in dollars, contracts) bid levels for ``side``, or None if the book can't be read.
+
+    Accepts the shapes Kalshi has used: {"orderbook": {...}} or {"orderbook_fp": {...}},
+    with levels under "<side>_dollars" ([["0.70", "120"], ...]) or "<side>" ([[70, 120], ...]).
+    """
+    ob = None
+    for key in ("orderbook_fp", "orderbook"):
+        if isinstance(orderbook.get(key), dict):
+            ob = orderbook[key]
+            break
+    if ob is None:
+        ob = orderbook
+    for key, scale in ((f"{side}_dollars", 1.0), (f"{side}_dollars_fp", 1.0), (side, 0.01)):
+        if key not in ob:
+            continue
+        levels = ob.get(key) or []   # an empty / null list is a real empty book
+        out = []
         for lvl in levels:
             try:
-                if abs(float(lvl[0]) - price) < 0.0005:
-                    total += float(lvl[1])
+                out.append((float(lvl[0]) * scale, float(lvl[1])))
             except (TypeError, ValueError, IndexError):
-                continue
-        return total
-    for lvl in ob.get(side) or []:
-        try:
-            if abs(float(lvl[0]) / 100 - price) < 0.0005:
-                total += float(lvl[1])
-        except (TypeError, ValueError, IndexError):
-            continue
-    return total
+                return None
+        return out
+    return None
+
+
+def queue_ahead(orderbook: Dict[str, Any], side: str, price: float) -> Optional[float]:
+    """Contracts already bidding at ``price`` on ``side`` (they fill before us).
+    None if the book's format isn't recognised (the caller then skips the order:
+    assuming nobody is ahead would make fills look easier than they are)."""
+    levels = _book_levels(orderbook, side)
+    if levels is None:
+        return None
+    return sum(q for p, q in levels if abs(p - price) < 0.0005)
 
 
 def _trade_side_price(tr: Dict[str, Any], side: str) -> Optional[float]:
@@ -460,8 +475,17 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
         ahead = 0.0
         if not q["improved"]:
             try:
-                ahead = queue_ahead(await client.get_orderbook(q["ticker"]), q["side"], q["price"])
+                book = await client.get_orderbook(q["ticker"])
             except Exception:
+                continue
+            ahead = queue_ahead(book, q["side"], q["price"])
+            if ahead is None:
+                if logger:
+                    logger.warning(f"MAKER skip {q['ticker']}: unreadable order book keys={list(book)[:5]}")
+                continue
+            if ahead == 0:
+                # Joining the best bid means someone is already there; an empty level here
+                # means the book moved. Re-check next cycle rather than guess.
                 continue
         _insert(q, ahead, now, path)
         stats["posted"] += 1
