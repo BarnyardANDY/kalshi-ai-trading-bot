@@ -113,6 +113,9 @@ class FakeClient:
             return {"trades": [t for t in self.trades if params["ticker"] == t.get("ticker", params["ticker"])]}
         return {"markets": list(self.markets.values())}
 
+    async def get_markets(self, limit=100, tickers=None, **kw):
+        return {"markets": [dict(self.markets[t], result=self.result) for t in (tickers or []) if t in self.markets]}
+
     async def get_market(self, ticker):
         m = dict(self.markets[ticker])
         m["result"] = self.result
@@ -156,3 +159,24 @@ def test_disabled_posts_nothing(tmp_path):
     runtime_config.save({"MAKER_ENABLED": False})
     s = asyncio.run(MK.run_cycle(FakeClient([mkt()]), now=NOW, path=str(tmp_path / "m.db")))
     assert s["posted"] == 0
+
+
+def test_trades_from_other_markets_ignored():
+    other = dict(tr(NOW + 5, "no", 0.10, 999), ticker="KXOTHER-1-A")
+    assert MK.check_fill([other], "yes", 0.70, 5, 0, NOW, "KXNFLGAME-26OCT18BUFMIA-BUF") is None
+    mine = dict(tr(NOW + 5, "no", 0.69, 1), ticker="KXNFLGAME-26OCT18BUFMIA-BUF")
+    assert MK.check_fill([mine], "yes", 0.70, 5, 0, NOW, "KXNFLGAME-26OCT18BUFMIA-BUF") is not None
+
+
+def test_settles_early_closing_market(tmp_path):
+    db = str(tmp_path / "m.db")
+    MK._last_full_settle = 0.0
+    c = FakeClient([mkt(hours=30)])
+    asyncio.run(MK.run_cycle(c, now=NOW, path=db))
+    c.trades = [tr(NOW + 60, "no", 0.69, 1)]
+    asyncio.run(MK.run_cycle(c, now=NOW + 120, path=db))
+    c.result = "no"                                  # game over long before close_time
+    MK._last_full_settle = 0.0
+    asyncio.run(MK.run_cycle(c, now=NOW + 3 * 3600, path=db, universe=[]))
+    r = MK.rows("settled", db)[0]
+    assert r["pnl"] == pytest.approx(-3.5 - 0.02) and "sold through" in (r["note"] or "")

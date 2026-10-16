@@ -40,7 +40,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 DB_PATH = os.getenv("MAKER_DB", "data/maker.db")
 MAKER_FEE_RATE = 0.0175          # Kalshi maker fee where charged (quarter of the 7% taker rate)
-EXCLUDE_PREFIXES = ("KXMVE",)    # multi-leg combo markets: illiquid, not real single bets
+EXCLUDE_PREFIXES = ("KXMVE",)
+_last_full_settle = 0.0    # multi-leg combo markets: illiquid, not real single bets
 
 
 # ----------------------------------------------------------------------------
@@ -193,7 +194,13 @@ def _trade_side_price(tr: Dict[str, Any], side: str) -> Optional[float]:
 
 
 def check_fill(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: int,
-               ahead: float, posted_ts: float) -> Optional[float]:
+               ahead: float, posted_ts: float, ticker: Optional[str] = None) -> Optional[float]:
+    r = fill_detail(trades, side, price, qty, ahead, posted_ts, ticker)
+    return r[0] if r else None
+
+
+def fill_detail(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: int,
+                ahead: float, posted_ts: float, ticker: Optional[str] = None) -> Optional[Tuple[float, str]]:
     """Timestamp at which a resting buy would have filled, or None.
 
     Fills if someone sold our side BELOW our price after we posted (they'd have
@@ -202,6 +209,8 @@ def check_fill(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: i
     """
     at_price = 0.0
     for tr in sorted(trades, key=lambda x: ts_of(x.get("created_time")) or 0):
+        if ticker and tr.get("ticker") and tr["ticker"] != ticker:
+            continue  # someone else's market
         t = ts_of(tr.get("created_time"))
         if t is None or t <= posted_ts:
             continue
@@ -210,11 +219,11 @@ def check_fill(trades: Iterable[Dict[str, Any]], side: str, price: float, qty: i
             continue
         n = _num(tr, "count_fp", "count")
         if p < price - 0.0005:
-            return t
+            return t, f"sold through at {p:.2f}"
         if abs(p - price) < 0.0005:
             at_price += n
             if at_price >= ahead + qty:
-                return t
+                return t, f"{at_price:.0f} sold at our price ({ahead:.0f} ahead)"
     return None
 
 
@@ -363,29 +372,45 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
             if logger:
                 logger.warning(f"MAKER trades fetch failed for {r['ticker']}: {e}")
             continue
-        t = check_fill(trades, r["side"], r["price"], r["qty"], r["queue_ahead"] or 0, r["posted_ts"])
+        fd = fill_detail(trades, r["side"], r["price"], r["qty"], r["queue_ahead"] or 0, r["posted_ts"],
+                         r["ticker"])
+        t = fd[0] if fd else None
         if t is not None and t <= min(now, r["close_ts"] or now):
             fee = maker_fee(r["price"], r["qty"])
-            _update(r["id"], path, status="filled", fill_ts=t, fee=fee)
+            _update(r["id"], path, status="filled", fill_ts=t, fee=fee, note=fd[1])
             stats["filled"] += 1
             if logger:
                 logger.info(f"MAKER FILL {r['ticker']} {r['side'].upper()} {r['qty']} @ {r['price']:.2f}")
 
-    # 2. Settle filled positions after close
-    for r in rows("filled", path):
-        if r["close_ts"] and now < r["close_ts"]:
-            continue
+    # 2. Settle filled positions. Many markets close early once the outcome is
+    # known, so check every held market now and then, not only after close_time.
+    global _last_full_settle
+    held = rows("filled", path)
+    due = [r for r in held if not r["close_ts"] or now >= r["close_ts"]]
+    if now - _last_full_settle > 10 * 60:
+        due, _last_full_settle = held, now
+    for i in range(0, len(due), 50):
+        batch = due[i:i + 50]
         try:
-            m = (await client.get_market(r["ticker"])).get("market", {})
-        except Exception:
+            resp = await client.get_markets(limit=100, tickers=[r["ticker"] for r in batch])
+            got = {m.get("ticker"): m for m in resp.get("markets") or []}
+        except Exception as e:
+            if logger:
+                logger.warning(f"MAKER settle lookup failed: {e}")
             continue
-        pnl = settle_pnl(r["side"], r["price"], r["qty"], r["fee"] or 0.0, m.get("result") or "")
-        if pnl is None:
-            continue
-        _update(r["id"], path, status="settled", result=(m.get("result") or "").lower(), pnl=pnl, settled_ts=now)
-        stats["settled"] += 1
-        if logger:
-            logger.info(f"MAKER SETTLED {r['ticker']} {r['side'].upper()} result={m.get('result')} pnl={pnl:+.2f}")
+        for r in batch:
+            m = got.get(r["ticker"])
+            if not m:
+                continue
+            pnl = settle_pnl(r["side"], r["price"], r["qty"], r["fee"] or 0.0, m.get("result") or "")
+            if pnl is None:
+                continue
+            _update(r["id"], path, status="settled", result=(m.get("result") or "").lower(), pnl=pnl,
+                    settled_ts=now)
+            stats["settled"] += 1
+            if logger:
+                logger.info(f"MAKER SETTLED {r['ticker']} {r['side'].upper()} result={m.get('result')} "
+                            f"pnl={pnl:+.2f}")
 
     # 3. Fresh market view
     if universe is None:
