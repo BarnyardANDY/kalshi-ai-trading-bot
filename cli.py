@@ -1582,6 +1582,51 @@ def cmd_gap_study(args: argparse.Namespace) -> None:
         print("\nGap study stopped.")
 
 
+def cmd_whale_study(args: argparse.Namespace) -> None:
+    """Whale-follow study (measurement only). See src/whale.py."""
+    from src import whale as W
+
+    if args.report:
+        df = W.features(W.rows(), W.series_meta())
+        sm = W.summary(df)
+        print("=" * 70)
+        print("  WHALE-FOLLOW STUDY: copy every big trade 1 minute late (no trading)")
+        print("=" * 70)
+        print(f"  whale trades recorded {sm['events']}, settled {sm.get('settled', 0)} "
+              f"across {sm.get('markets', 0)} markets")
+        if sm.get("copy_c") is not None:
+            print(f"  copying them: {sm['copy_c']:+.2f} c/contract (+/- {sm['margin'] or 0:.1f}), "
+                  f"win rate {sm['win_rate']:.0%}, avg copy price {sm['avg_entry']:.2f}")
+        for lag in (5, 30, 60):
+            v = sm.get(f"drift_{lag}m")
+            if v is not None:
+                print(f"  price {lag:>2} min later vs our copy price: {v:+.2f} c")
+        t = W.slice_table(df, "size_bucket")
+        if not t.empty:
+            print("\n  by size:")
+            for _, r in t.iterrows():
+                print(f"    {r['group']:>10}: {r['whale trades']:5d} trades, {r['c_per_contract']:+.2f} c "
+                      f"(+/- {r['margin']:.1f}) {r['verdict']}")
+        print()
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("whale")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/whale_study.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    print("Whale-follow study running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(W.run_forever(logger, min_notional=args.min_notional))
+    except KeyboardInterrupt:
+        print("\nWhale study stopped.")
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -2143,6 +2188,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_gap.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_gap.add_argument("--series", default="", help="Comma list, default KXBTC15M,KXETH15M,KXSOL15M")
     p_gap.set_defaults(func=cmd_gap_study)
+
+    # --- whale-study ---
+    p_wh = subparsers.add_parser(
+        "whale-study",
+        help="Measure whether copying big Kalshi trades 1 minute late would make money (never trades)",
+        description="Watch Kalshi's public trade tape, record unusually large trades, snapshot each market "
+                    "1/5/30/60 minutes later and at settlement, and score copying them at the real ask + fee.",
+    )
+    p_wh.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_wh.add_argument("--min-notional", type=float, default=250.0, help="Smallest trade to record, in dollars")
+    p_wh.set_defaults(func=cmd_whale_study)
 
     # --- health ---
     p_health = subparsers.add_parser(

@@ -104,8 +104,9 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_gap, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Speed gaps", "Strategy controls", "Open positions", "Learning", "Predictions"])
+tab_perf, tab_maker, tab_gap, tab_whale, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Speed gaps", "Whale follow", "Strategy controls", "Open positions", "Learning",
+     "Predictions"])
 
 # ----------------------------------------------------------------------------
 # Performance
@@ -455,3 +456,58 @@ with tab_gap:
                    "bot could chase. Positive only at 0s = only the fastest pros can get it.")
         if g["gaps"]:
             st.dataframe(pd.DataFrame(g["gaps"]), hide_index=True, use_container_width=True)
+
+# ----------------------------------------------------------------------------
+# Whale follow (separate study)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=120)
+def _whale():
+    return D.whale_study()
+
+
+with tab_whale:
+    st.caption("Measurement only, no trading, separate from every other test. Watches Kalshi's whole public "
+               "trade tape for unusually large trades ($250+), then asks: if you had copied each one ONE MINUTE "
+               "LATE, at the real ask plus the taker fee, and held to settlement, would you have made money? "
+               "Runs as tmux session 'whale'.")
+    wd = _whale()
+    sm, wf = wd["summary"], wd["features"]
+    if not sm.get("events"):
+        st.info("No whale trades recorded yet. On the server: tmux session 'whale' running "
+                "`python cli.py whale-study`.")
+    else:
+        a, b, cc, d, e = st.columns(5)
+        a.metric("Whale trades seen", f"{sm['events']:,}")
+        b.metric("Settled", f"{sm.get('settled', 0):,}", f"{sm.get('markets', 0)} markets", delta_color="off")
+        cc.metric("Copy ¢ / contract", f"{sm['copy_c']:+.2f}¢" if sm.get("copy_c") is not None else "–",
+                  f"± {sm['margin']:.1f}¢" if sm.get("margin") else None, delta_color="off")
+        d.metric("Win rate", f"{sm['win_rate']:.0%}" if sm.get("win_rate") is not None else "–",
+                 f"avg copy price {sm['avg_entry']:.2f}" if sm.get("avg_entry") else None, delta_color="off")
+        e.metric("Price 30 min later", f"{sm['drift_30m']:+.2f}¢" if sm.get("drift_30m") is not None else "–",
+                 "vs our copy price", delta_color="off")
+        st.caption("'Price 30 min later' above zero means prices keep drifting the whale's way after you could "
+                   "have copied: the signal survives the delay. Copy ¢/contract is the bottom line after fees.")
+        from src import whale as W
+        st.markdown("#### Slice the results")
+        wdim = st.selectbox("Split by", list(W.DIMENSIONS), index=0, key="whale_dim")
+        wt = W.slice_table(wf, W.DIMENSIONS[wdim])
+        if wt.empty:
+            st.info("No settled whale trades yet. Most markets take hours to days to settle.")
+        else:
+            st.dataframe(wt, hide_index=True, use_container_width=True,
+                         column_config={"win rate": st.column_config.NumberColumn(format="percent"),
+                                        "avg copy price": st.column_config.NumberColumn(format="%.2f"),
+                                        "c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                        "margin": st.column_config.NumberColumn("± margin (¢)", format="%.1f"),
+                                        "drift 30m (c)": st.column_config.NumberColumn(format="%+.2f")})
+        st.markdown("#### Latest whale trades")
+        show = wf.sort_values("ts", ascending=False)[["time_et", "ticker", "title", "side", "contracts", "notional",
+                                                        "vwap", "entry_ask", "drift_30m_c", "result", "copy_c"]].head(200)
+        st.dataframe(show, hide_index=True, use_container_width=True,
+                     column_config={"notional": st.column_config.NumberColumn("size ($)", format="dollar"),
+                                    "vwap": st.column_config.NumberColumn("whale price", format="%.2f"),
+                                    "entry_ask": st.column_config.NumberColumn("copy price (+1 min)", format="%.2f"),
+                                    "drift_30m_c": st.column_config.NumberColumn("30 min later (c)", format="%+.1f"),
+                                    "copy_c": st.column_config.NumberColumn("copy result (c)", format="%+.1f")})
+        st.download_button("Download whale trades (CSV)", wf.to_csv(index=False).encode(),
+                           file_name="whale_trades.csv", mime="text/csv", key="dl_whale")

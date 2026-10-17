@@ -194,6 +194,15 @@ def gap_study() -> Optional[Dict[str, Any]]:
     return crypto_gap.report()
 
 
+def whale_study() -> Dict[str, Any]:
+    from src import whale
+
+    if not os.path.exists(whale.DB_PATH):
+        return {"features": pd.DataFrame(), "summary": {"events": 0}}
+    df = whale.features(whale.rows(), whale.series_meta())
+    return {"features": df, "summary": whale.summary(df)}
+
+
 # ----------------------------------------------------------------------------
 # Status
 # ----------------------------------------------------------------------------
