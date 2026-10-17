@@ -104,8 +104,8 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Strategy controls", "Open positions", "Learning", "Predictions"])
+tab_perf, tab_maker, tab_gap, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Speed gaps", "Strategy controls", "Open positions", "Learning", "Predictions"])
 
 # ----------------------------------------------------------------------------
 # Performance
@@ -420,3 +420,38 @@ with tab_maker:
                      column_config={"price": st.column_config.NumberColumn(format="%.2f"),
                                     "queue_ahead": st.column_config.NumberColumn("queue ahead", format="%.0f"),
                                     "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+
+# ----------------------------------------------------------------------------
+# Speed gaps (15-minute crypto study)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=600)
+def _gap_report():
+    return D.gap_study()
+
+
+with tab_gap:
+    st.caption("Measurement only, no trading. Every second: bitcoin/ether/solana from Coinbase, Kraken and "
+               "Bitstamp, and Kalshi's 15-minute up/down markets. A 'gap' is Kalshi's ask sitting below our fair "
+               "value by more than the taker fee. The question: do gaps last long enough, and pay enough, for a "
+               "bot that reacts in 1-3 seconds? Runs as tmux session 'gap'. Refreshes every 10 minutes.")
+    g = _gap_report()
+    if not g or not g["samples"]:
+        st.info("No data yet. On the server: tmux session 'gap' running `python cli.py gap-study`.")
+    else:
+        a, b, cc = st.columns(3)
+        a.metric("Hours recorded", f"{g['hours']:.1f}")
+        b.metric("Samples", f"{g['samples']:,}")
+        cc.metric("Markets settled", g["markets_settled"])
+        st.markdown("#### 1. Is our fair value as accurate as Kalshi's own price?")
+        st.caption("Lower Brier = more accurate. If ours is worse than Kalshi's, the 'gaps' below are mostly our "
+                   "own error, not real opportunities.")
+        if g["calibration"]:
+            st.dataframe(pd.DataFrame(g["calibration"]), hide_index=True, use_container_width=True,
+                         column_config={"our model Brier": st.column_config.NumberColumn(format="%.4f"),
+                                        "Kalshi price Brier": st.column_config.NumberColumn(format="%.4f")})
+        st.markdown("#### 2. Gaps, and what buying them would have earned")
+        st.caption("For each gap: buy the cheap side at the ask seen 0, 1, 3 or 10 seconds after the gap "
+                   "appeared, pay the fee, hold to settlement. Positive at 1-3s late = an edge a fast home-built "
+                   "bot could chase. Positive only at 0s = only the fastest pros can get it.")
+        if g["gaps"]:
+            st.dataframe(pd.DataFrame(g["gaps"]), hide_index=True, use_container_width=True)

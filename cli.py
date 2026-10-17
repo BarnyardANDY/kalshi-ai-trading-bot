@@ -1537,6 +1537,51 @@ def cmd_maker(args: argparse.Namespace) -> None:
         print("\nMaker test stopped.")
 
 
+def cmd_gap_study(args: argparse.Namespace) -> None:
+    """15-minute crypto speed-gap study (measurement only). See src/crypto_gap.py."""
+    from src import crypto_gap as G
+
+    if args.report:
+        rep = G.report()
+        print("=" * 70)
+        print("  SPEED-GAP STUDY: Kalshi 15-minute crypto markets (no trading)")
+        print("=" * 70)
+        print(f"  {rep['samples']:,} samples over {rep['hours']:.1f} hours; {rep['markets_settled']} markets settled")
+        print("\n  Is our fair value as accurate as Kalshi's price? (Brier, lower = better)")
+        for r in rep["calibration"]:
+            print(f"    {r['time left']:>14}: ours {r['our model Brier']:.4f} vs Kalshi {r['Kalshi price Brier']:.4f}"
+                  f"  ({r['samples']} samples)")
+        print("\n  Gaps where Kalshi's ask was below our fair value by more than the fee:")
+        for g in rep["gaps"]:
+            parts = [f"{g['min edge after fee']:>4}: {g['gaps']} gaps"]
+            if g["median seconds"] is not None:
+                parts.append(f"median {g['median seconds']:.0f}s, {g['share lasting 3s+']:.0%} last 3s+")
+            for d in (0, 1, 3, 10):
+                v = g.get(f"{d}s late: c/contract")
+                if v is not None:
+                    parts.append(f"{d}s late {v:+.1f}c")
+            print("    " + " | ".join(parts))
+        print()
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("gap")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/gap_study.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    series = [x.strip().upper() for x in args.series.split(",") if x.strip()] if args.series else None
+    print("Speed-gap study running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(G.run_forever(logger, series=series))
+    except KeyboardInterrupt:
+        print("\nGap study stopped.")
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -2086,6 +2131,18 @@ def build_parser() -> argparse.ArgumentParser:
                       help="v1 = original; v2 = one bet per match, before the event only, first in line, "
                            "pulls orders when the price turns (own database data/maker_v2.db)")
     p_mk.set_defaults(func=cmd_maker)
+
+    # --- gap-study ---
+    p_gap = subparsers.add_parser(
+        "gap-study",
+        help="Measure speed gaps in Kalshi's 15-minute crypto markets (never trades)",
+        description="Every second, record bitcoin/ether/solana prices from Coinbase, Kraken and Bitstamp and "
+                    "Kalshi's 15-minute up/down markets; measure how often Kalshi lags fair value by more than "
+                    "the fee, for how long, and what acting 0/1/3/10 seconds late would have earned.",
+    )
+    p_gap.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_gap.add_argument("--series", default="", help="Comma list, default KXBTC15M,KXETH15M,KXSOL15M")
+    p_gap.set_defaults(func=cmd_gap_study)
 
     # --- health ---
     p_health = subparsers.add_parser(

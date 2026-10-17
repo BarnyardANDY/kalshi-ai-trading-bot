@@ -186,6 +186,14 @@ def maker_data(variant: str = "v1") -> Dict[str, Any]:
     return {"report": maker.report(rows), "orders": df, "features": feats}
 
 
+def gap_study() -> Optional[Dict[str, Any]]:
+    from src import crypto_gap
+
+    if not os.path.exists(crypto_gap.DB_PATH):
+        return None
+    return crypto_gap.report()
+
+
 # ----------------------------------------------------------------------------
 # Status
 # ----------------------------------------------------------------------------
