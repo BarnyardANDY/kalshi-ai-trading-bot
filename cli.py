@@ -1627,6 +1627,43 @@ def cmd_whale_study(args: argparse.Namespace) -> None:
         print("\nWhale study stopped.")
 
 
+def cmd_arb_scan(args: argparse.Namespace) -> None:
+    """Price-inconsistency scan (measurement only). See src/arb_scan.py."""
+    from src import arb_scan as A
+
+    if args.report:
+        rep = A.report()
+        print("=" * 70)
+        print("  PRICE-INCONSISTENCY SCAN (no trading)")
+        print("=" * 70)
+        print(f"  {rep['scans']} scans over {rep.get('hours', 0):.1f} hours, "
+              f"{rep.get('total', 0)} inconsistencies found")
+        bk = rep.get("by_kind")
+        if bk is not None and not bk.empty:
+            for _, r in bk.iterrows():
+                print(f"    {r['kind']:<32} {r['found']:5d} found ({r['per_day']:.1f}/day), median edge "
+                      f"{r['median_edge_c']:.1f}c, median {r['median_minutes']:.1f} min, "
+                      f"{r['with_10plus_sets']} with 10+ sets available")
+        print()
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("arb")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/arb_scan.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    print("Price-inconsistency scan running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(A.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nScan stopped.")
+
+
 def cmd_backtest(args: argparse.Namespace) -> None:
     """Honest status of backtesting — and what to use instead today."""
     print("=" * 64)
@@ -2199,6 +2236,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_wh.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_wh.add_argument("--min-notional", type=float, default=250.0, help="Smallest trade to record, in dollars")
     p_wh.set_defaults(func=cmd_whale_study)
+
+    # --- arb-scan ---
+    p_arb = subparsers.add_parser(
+        "arb-scan",
+        help="Scan every open Kalshi event for prices that can't all be right (never trades)",
+        description="Every 30s: mutually exclusive events where buying every NO (or every YES) costs less "
+                    "than it is guaranteed to pay after fees, and 'above/below X' ladders priced out of order. "
+                    "Logs how big, how long, and how many contracts were actually available.",
+    )
+    p_arb.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_arb.set_defaults(func=cmd_arb_scan)
 
     # --- health ---
     p_health = subparsers.add_parser(

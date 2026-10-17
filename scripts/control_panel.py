@@ -104,9 +104,9 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_gap, tab_whale, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Speed gaps", "Whale follow", "Strategy controls", "Open positions", "Learning",
-     "Predictions"])
+tab_perf, tab_maker, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
+     "Open positions", "Learning", "Predictions"])
 
 # ----------------------------------------------------------------------------
 # Performance
@@ -511,3 +511,43 @@ with tab_whale:
                                     "copy_c": st.column_config.NumberColumn("copy result (c)", format="%+.1f")})
         st.download_button("Download whale trades (CSV)", wf.to_csv(index=False).encode(),
                            file_name="whale_trades.csv", mime="text/csv", key="dl_whale")
+
+# ----------------------------------------------------------------------------
+# Price inconsistencies (separate study)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=60)
+def _arb():
+    return D.arb_scan()
+
+
+with tab_arb:
+    st.caption("Measurement only, no trading, separate from every other test. Every 30 seconds it checks every "
+               "open Kalshi event for prices that can't all be right: buying every NO (or every YES) in a "
+               "one-winner event, or two rungs of an 'above/below X' ladder, for less than the guaranteed payout "
+               "after fees. 'Sets available' = how many it could actually have bought at those prices. "
+               "Runs as tmux session 'arb'.")
+    ar = _arb()
+    if not ar.get("scans"):
+        st.info("No scans yet. On the server: tmux session 'arb' running `python cli.py arb-scan`.")
+    else:
+        a, b, cc = st.columns(3)
+        a.metric("Scans", f"{ar['scans']:,}", f"{ar['hours']:.1f} hours", delta_color="off")
+        b.metric("Events per scan", f"{ar['events_per_scan']:,.0f}", f"{ar['scan_seconds']:.0f}s per scan",
+                 delta_color="off")
+        cc.metric("Inconsistencies found", f"{ar.get('total', 0):,}")
+        st.caption("'all YES ... list may be incomplete' is NOT riskless (an unlisted outcome could win), so "
+                   "judge only the other kinds. A real opportunity = a decent edge, 10+ sets available, and lasting "
+                   "more than a scan or two.")
+        if not ar["by_kind"].empty:
+            st.dataframe(ar["by_kind"], hide_index=True, use_container_width=True,
+                         column_config={"per_day": st.column_config.NumberColumn("per day", format="%.1f"),
+                                        "median_edge_c": st.column_config.NumberColumn("median edge (c/set)", format="%.1f"),
+                                        "median_minutes": st.column_config.NumberColumn("median minutes open", format="%.1f"),
+                                        "with_10plus_sets": st.column_config.NumberColumn("with 10+ sets"),
+                                        "profit_if_all_taken": st.column_config.NumberColumn("profit if all taken", format="dollar")})
+        if not ar["recent"].empty:
+            st.markdown("#### Latest")
+            st.dataframe(ar["recent"], hide_index=True, use_container_width=True,
+                         column_config={"edge_c": st.column_config.NumberColumn("edge (c/set)", format="%.1f"),
+                                        "contracts": st.column_config.NumberColumn("sets available", format="%.0f"),
+                                        "lasted_min": st.column_config.NumberColumn("lasted (min)", format="%.1f")})

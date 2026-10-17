@@ -203,6 +203,11 @@ def whale_study() -> Dict[str, Any]:
     return {"features": df, "summary": whale.summary(df)}
 
 
+def arb_scan() -> Dict[str, Any]:
+    from src import arb_scan
+    return arb_scan.report()
+
+
 # ----------------------------------------------------------------------------
 # Status
 # ----------------------------------------------------------------------------
