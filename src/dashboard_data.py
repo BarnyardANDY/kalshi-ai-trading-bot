@@ -167,13 +167,14 @@ def would_have_traded(min_gap: float = 0.10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def maker_data() -> Dict[str, Any]:
-    """Maker test results and its orders (data/maker.db)."""
+def maker_data(variant: str = "v1") -> Dict[str, Any]:
+    """Maker test results and its orders (data/maker.db, or data/maker_v2.db for v2)."""
     from src import maker
 
-    if not os.path.exists(maker.DB_PATH):
+    path = maker.db_path(variant)
+    if not os.path.exists(path):
         return {"report": None, "orders": pd.DataFrame(), "features": pd.DataFrame()}
-    rows = maker.rows()
+    rows = maker.rows(path=path)
     df = pd.DataFrame(rows)
     if not df.empty:
         tz = os.getenv("DASHBOARD_TZ", "America/New_York")
@@ -181,7 +182,7 @@ def maker_data() -> Dict[str, Any]:
             df[col.replace("_ts", "")] = (pd.to_datetime(df[col], unit="s", utc=True, errors="coerce")
                                           .dt.tz_convert(tz).dt.tz_localize(None))
     from src import maker_analysis
-    feats = maker_analysis.features(rows, maker.series_meta())
+    feats = maker_analysis.features(rows, maker.series_meta(path))
     return {"report": maker.report(rows), "orders": df, "features": feats}
 
 

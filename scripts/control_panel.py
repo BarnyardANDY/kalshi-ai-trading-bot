@@ -58,7 +58,8 @@ def load_all():
         "wht": D.would_have_traded(float(RC.get("MIN_EDGE"))),
         "ai": D.ai_spend_today(),
         "status": D.bot_status(),
-        "maker": D.maker_data(),
+        "maker": D.maker_data("v1"),
+        "maker_v2": D.maker_data("v2"),
     }
 
 
@@ -337,10 +338,19 @@ with tab_maker:
                "Kalshi's public trade tape shows someone actually sold at or below our price after we posted, "
                "past the queue ahead of us. Held to settlement; maker fee charged on every fill. "
                "Runs as its own process: tmux session 'maker'.")
-    mk = data["maker"]
+    ver = st.radio("Version", ["v1: original", "v2: before the event, first in line, one per match"],
+                   horizontal=True, key="maker_ver")
+    v2 = ver.startswith("v2")
+    if v2:
+        st.caption("v2 changes, from v1's record: at most one bet per match; only before the event (expected end "
+                   "4h+ away, orders pulled under 3h); only where the bid/ask gap is 3c+ so it's first in line; "
+                   "orders pulled when our side's price falls 2c or the bid drops below ours; checks every 15s. "
+                   "tmux session 'maker2'.")
+    mk = data["maker_v2" if v2 else "maker"]
     rep = mk["report"]
     if not rep or not rep["posted"]:
-        st.info("No maker orders yet. Start it on the server: tmux session 'maker' running `python cli.py maker`.")
+        st.info("No orders yet for this version. On the server: tmux session "
+                + ("'maker2' running `python cli.py maker --variant v2`." if v2 else "'maker' running `python cli.py maker`."))
     else:
         a, b, cc, d, e, f = st.columns(6)
         a.metric("Orders posted", rep["posted"], f"{rep['open']} resting now", delta_color="off")
@@ -380,7 +390,7 @@ with tab_maker:
         st.caption("Pick a way to split the settled bets. Each row says whether that group is clearly making "
                    "money, clearly losing, or still too noisy to tell (the ± margin shrinks as more events "
                    "settle). Look for a group that stays 'clearly positive' as data piles up.")
-        dim_label = st.selectbox("Split by", list(MA.DIMENSIONS), index=0, key="maker_dim")
+        dim_label = st.selectbox("Split by", list(MA.DIMENSIONS), index=0, key=f"maker_dim_{'v2' if v2 else 'v1'}")
         tbl = MA.slice_table(feats, MA.DIMENSIONS[dim_label])
         if tbl.empty:
             st.info("No settled bets yet.")
@@ -399,7 +409,8 @@ with tab_maker:
             st.plotly_chart(chart_layout(fig, 280), use_container_width=True)
         if not feats.empty:
             st.download_button("Download every order (CSV)", feats.to_csv(index=False).encode(),
-                               file_name="maker_orders.csv", mime="text/csv")
+                               file_name=f"maker_{'v2' if v2 else 'v1'}_orders.csv", mime="text/csv",
+                               key=f"dl_{'v2' if v2 else 'v1'}")
 
         st.markdown("#### Orders")
         show = od.sort_values("posted_ts", ascending=False)[

@@ -24,8 +24,23 @@ So this strategy does the opposite of the old bot:
 6. Hold to settlement. Charge the maker fee on every fill (conservative: many
    markets charge makers nothing).
 
+Version 2 (``MAKER_VARIANT=v2``, own database ``data/maker_v2.db``) answers what
+version 1's record showed: most fills happened because the price dropped through
+our bid during live games (we were picked off), and many bets piled onto the
+same match. V2 therefore:
+
+* takes at most ONE bet per match (all of a match's markets share the middle
+  part of the event ticker, e.g. 26OCT16MEMTULN),
+* only quotes BEFORE the event: the market's expected end must be at least
+  4 hours away, and resting orders are pulled once it is under 3 hours,
+* only quotes where the bid/ask gap is 3c+, so it is always first in line
+  (never joins a 1,000-contract queue in a busy market),
+* pulls an order as soon as our side's price falls 2c below where it was when
+  posted, or the best bid drops below our price,
+* checks every 15 seconds instead of every minute.
+
 Nothing in this module can place a real order: it never calls place_order.
-Everything is stored in ``data/maker.db``.
+Everything is stored in ``data/maker.db`` (v1) or ``data/maker_v2.db`` (v2).
 """
 from __future__ import annotations
 
@@ -38,7 +53,25 @@ from contextlib import closing
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-DB_PATH = os.getenv("MAKER_DB", "data/maker.db")
+DB_PATH = os.getenv("MAKER_DB", "data/maker.db")   # version 1 (kept for compatibility)
+
+
+def variant() -> str:
+    """Which version this process runs: 'v1' (original) or 'v2'."""
+    return (os.getenv("MAKER_VARIANT") or "v1").lower()
+
+
+def db_path(v: Optional[str] = None) -> str:
+    v = (v or variant()).lower()
+    if v == "v2":
+        return os.getenv("MAKER_V2_DB", "data/maker_v2.db")
+    return os.getenv("MAKER_DB", "data/maker.db")
+
+
+def match_key(event: str) -> str:
+    """Shared id of a game across its many Kalshi events (winner, totals, maps, ...)."""
+    parts = (event or "").split("-")
+    return parts[1] if len(parts) > 1 else (event or "")
 MAKER_FEE_RATE = 0.0175          # Kalshi maker fee where charged (quarter of the 7% taker rate)
 EXCLUDE_PREFIXES = ("KXMVE",)
 _last_full_settle = 0.0    # multi-leg combo markets: illiquid, not real single bets
@@ -65,7 +98,18 @@ def settings() -> Dict[str, Any]:
         "order_minutes": float(_rc("MAKER_ORDER_MINUTES")),
         "max_per_series": int(_rc("MAKER_MAX_PER_SERIES")),
         "min_volume_24h": float(_rc("MAKER_MIN_VOLUME_24H")),
+        **(V2_RULES if variant() == "v2" else {"v2": False}),
     }
+
+
+V2_RULES = {
+    "v2": True,
+    "min_spread": 0.03,          # always first in line
+    "pre_event_hours": 4.0,      # expected end at least this far away to post
+    "pull_within_hours": 3.0,    # pull resting orders once the expected end is this close
+    "pull_move": 0.02,           # pull if our side's mid falls this much below where it was
+    "interval": 15,              # seconds between checks
+}
 
 
 # ----------------------------------------------------------------------------
@@ -151,6 +195,12 @@ def quote_for(m: Dict[str, Any], cfg: Dict[str, Any], now: Optional[float] = Non
     price = round(bid + (0.01 if improve else 0.0), 2)
     if not cfg["min_price"] <= price <= cfg["max_price"]:
         return None
+    if cfg.get("v2"):
+        if spread < cfg["min_spread"] - 1e-9:
+            return None
+        end = ts_of(m.get("expected_expiration_time")) or close
+        if (end - now) / 3600 < cfg["pre_event_hours"]:
+            return None
     return {"ticker": t, "event": m.get("event_ticker") or t.rsplit("-", 1)[0], "series": series_of(t),
             "side": side, "price": price, "improved": improve, "spread": spread, "close_ts": close,
             "title": " — ".join(x for x in (m.get("title"), m.get("yes_sub_title")) if x)[:200],
@@ -281,7 +331,7 @@ def settle_pnl(side: str, price: float, qty: int, fee: float, result: str) -> Op
 # ----------------------------------------------------------------------------
 
 def _conn(path: Optional[str] = None) -> sqlite3.Connection:
-    path = path or DB_PATH
+    path = path or db_path()
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
@@ -399,7 +449,7 @@ async def fetch_trades(client, ticker: str, since_ts: float, max_pages: int = 5)
 # ----------------------------------------------------------------------------
 
 def pick(candidates: List[Dict[str, Any]], open_rows: List[Dict[str, Any]], cfg: Dict[str, Any],
-         blocked: Iterable[str] = ()) -> List[Dict[str, Any]]:
+         blocked: Iterable[str] = (), blocked_matches: Iterable[str] = ()) -> List[Dict[str, Any]]:
     """Choose new orders: one per event, a few per series, up to the open-order cap.
     Busier markets first (more chances to fill, fairer prices)."""
     events = {r["event"] for r in open_rows}
@@ -408,16 +458,23 @@ def pick(candidates: List[Dict[str, Any]], open_rows: List[Dict[str, Any]], cfg:
         per_series[r["series"]] = per_series.get(r["series"], 0) + 1
     room = cfg["max_open"] - len(open_rows)
     blocked = set(blocked)
+    matches = set(blocked_matches) | {match_key(r["event"]) for r in open_rows}
     chosen = []
     for q in sorted(candidates, key=lambda x: -x["volume_24h"]):
         if room <= 0:
             break
         if q["event"] in events or q["ticker"] in blocked:
             continue
+        if cfg.get("v2"):
+            mk = match_key(q["event"])
+            if mk in matches:
+                continue
         if per_series.get(q["series"], 0) >= cfg["max_per_series"]:
             continue
         chosen.append(q)
         events.add(q["event"])
+        if cfg.get("v2"):
+            matches.add(match_key(q["event"]))
         per_series[q["series"]] = per_series.get(q["series"], 0) + 1
         room -= 1
     return chosen
@@ -495,9 +552,41 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
             universe = []
     by_ticker = {m.get("ticker"): m for m in universe}
 
-    # 4. Cancel stale orders: too old, about to close, or the bid moved above us
+    # 4. Cancel stale orders: too old, about to close, or the bid moved above us.
+    # V2 also pulls orders when the event is getting close or the price turns against us,
+    # using a fresh look at each resting order's market (not the few-minutes-old universe).
+    if cfg.get("v2"):
+        open_tickers = [r["ticker"] for r in rows("open", path)]
+        for i in range(0, len(open_tickers), 50):
+            try:
+                resp = await client.get_markets(limit=100, tickers=open_tickers[i:i + 50])
+                for m in resp.get("markets") or []:
+                    by_ticker[m.get("ticker")] = m
+            except Exception as e:
+                if logger:
+                    logger.warning(f"MAKER fresh quotes failed: {e}")
     for r in rows("open", path):
         reason = None
+        if cfg.get("v2"):
+            end = r.get("expected_exp_ts") or r["close_ts"]
+            m = by_ticker.get(r["ticker"])
+            if end and (end - now) / 3600 < cfg["pull_within_hours"]:
+                reason = "event getting close"
+            elif m:
+                q = quotes(m)
+                bid = q["yes_bid"] if r["side"] == "yes" else q["no_bid"]
+                mid = side_mid(m, r["side"])
+                # Kalshi's book doesn't contain our paper order, so compare with the best bid
+                # that was there when we posted (1c under ours when we improved on it).
+                book_bid_then = r["price"] - (0.01 if r.get("improved") else 0.0)
+                if 0 < bid < book_bid_then - 0.0005:
+                    reason = "price fell below our bid"
+                elif mid is not None and r.get("side_mid_post") and mid <= r["side_mid_post"] - cfg["pull_move"]:
+                    reason = "price moving against us"
+            if reason:
+                _update(r["id"], path, status="cancelled", note=reason)
+                stats["cancelled"] += 1
+                continue
         if now - r["posted_ts"] > cfg["order_minutes"] * 60:
             reason = "expired"
         elif r["close_ts"] and r["close_ts"] - now < cfg["min_minutes"] * 60 / 2:
@@ -518,8 +607,10 @@ async def run_cycle(client, logger=None, now: Optional[float] = None, path: Opti
         return stats
     open_now = rows("open", path)
     held = {r["ticker"] for r in rows("filled", path)}
+    used_matches = ({match_key(r["event"]) for r in rows(path=path) if r["status"] != "cancelled"}
+                    if cfg.get("v2") else set())
     candidates = [q for q in (quote_for(m, cfg, now) for m in universe) if q]
-    for q in pick(candidates, open_now, cfg, blocked=held):
+    for q in pick(candidates, open_now, cfg, blocked=held, blocked_matches=used_matches):
         # Re-quote on the live book (the universe can be a few minutes old).
         try:
             fresh = (await client.get_market(q["ticker"])).get("market", {})
@@ -637,7 +728,8 @@ def report(all_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
-async def run_forever(logger=None, interval: int = 60) -> None:
+async def run_forever(logger=None, interval: Optional[int] = None) -> None:
+    interval = interval or int(settings().get("interval", 60))
     from src.clients.kalshi_client import KalshiClient
     client = KalshiClient()
     universe, universe_ts = [], 0.0

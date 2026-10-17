@@ -1478,19 +1478,21 @@ def cmd_learning(args: argparse.Namespace) -> None:
 
 def cmd_maker(args: argparse.Namespace) -> None:
     """Maker test (paper only): patient favorite buyer. See src/maker.py."""
+    os.environ["MAKER_VARIANT"] = getattr(args, "variant", "v1") or "v1"
     from src import maker
+    tag = "" if maker.variant() == "v1" else f"_{maker.variant()}"
 
     if getattr(args, "export", False):
         from src import maker_analysis
         df = maker_analysis.features(maker.rows(), maker.series_meta())
-        out = maker_analysis.export_csv(df, "data/maker_export.csv")
+        out = maker_analysis.export_csv(df, f"data/maker{tag}_export.csv")
         print(f"Wrote {len(df)} orders to {out}")
         return
 
     if args.report:
         rep = maker.report(maker.rows())
         print("=" * 70)
-        print("  MAKER TEST (paper): patient favorite buyer")
+        print(f"  MAKER TEST {maker.variant()} (paper): patient favorite buyer")
         print("=" * 70)
         print(f"  orders posted {rep['posted']}, resting now {rep['open']}, filled {rep['filled']} "
               f"(fill rate {rep['fill_rate']:.0%}), settled {rep['settled']}, awaiting result {rep['awaiting']}")
@@ -1506,14 +1508,14 @@ def cmd_maker(args: argparse.Namespace) -> None:
         print()
         return
 
-    # Own log file (logs/maker.log), so it never mixes with the trading bot's logs.
+    # Own log file (logs/maker.log or logs/maker_v2.log), never mixed with the trading bot's logs.
     import logging
     Path("logs").mkdir(exist_ok=True)
     logger = logging.getLogger("maker")
     logger.setLevel(logging.INFO)
     if not logger.handlers:
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
-        for h in (logging.FileHandler("logs/maker.log"), logging.StreamHandler(sys.stdout)):
+        for h in (logging.FileHandler(f"logs/maker{tag}.log"), logging.StreamHandler(sys.stdout)):
             h.setFormatter(fmt)
             logger.addHandler(h)
     logger.propagate = False
@@ -1528,7 +1530,7 @@ def cmd_maker(args: argparse.Namespace) -> None:
                 await client.close()
         print(asyncio.run(_once()))
         return
-    print("Maker test running (paper only; no real orders are ever sent). Ctrl+C to stop.")
+    print(f"Maker test {maker.variant()} running (paper only; no real orders are ever sent). Ctrl+C to stop.")
     try:
         asyncio.run(maker.run_forever(logger))
     except KeyboardInterrupt:
@@ -2080,6 +2082,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_mk.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_mk.add_argument("--once", action="store_true", help="Run one cycle, print what it did, and exit")
     p_mk.add_argument("--export", action="store_true", help="Write every order with its labels to data/maker_export.csv")
+    p_mk.add_argument("--variant", choices=["v1", "v2"], default="v1",
+                      help="v1 = original; v2 = one bet per match, before the event only, first in line, "
+                           "pulls orders when the price turns (own database data/maker_v2.db)")
     p_mk.set_defaults(func=cmd_maker)
 
     # --- health ---
