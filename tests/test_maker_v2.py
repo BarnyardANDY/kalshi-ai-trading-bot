@@ -79,3 +79,14 @@ def test_unchanged_market_keeps_order(tmp_path):
     asyncio.run(MK.run_cycle(c, now=NOW + 15, path=db, universe=[]))
     asyncio.run(MK.run_cycle(c, now=NOW + 30, path=db, universe=[]))
     assert MK.rows(path=db)[0]["status"] == "open"
+
+
+def test_v2_universe_starts_after_pre_event_window():
+    seen = {}
+
+    class C:
+        async def _make_authenticated_request(self, method, endpoint, params=None, require_auth=True):
+            seen.update(params)
+            return {"markets": []}
+    asyncio.run(MK.fetch_universe(C(), MK.settings(), NOW))
+    assert seen["min_close_ts"] >= NOW + 4 * 3600

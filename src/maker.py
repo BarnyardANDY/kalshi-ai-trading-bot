@@ -401,12 +401,17 @@ def _update(oid: int, path: Optional[str] = None, **fields) -> None:
 # ----------------------------------------------------------------------------
 
 async def fetch_universe(client, cfg: Dict[str, Any], now: Optional[float] = None,
-                         max_pages: int = 10) -> List[Dict[str, Any]]:
+                         max_pages: int = 25) -> List[Dict[str, Any]]:
     now = now or time.time()
     out, cursor = [], None
+    # Kalshi lists the soonest-closing markets first, so v2 (which only wants markets whose event
+    # is 4h+ away) must start its window there, or the page cap fills up with games already on.
+    earliest = cfg["min_minutes"] * 60
+    if cfg.get("v2"):
+        earliest = max(earliest, cfg["pre_event_hours"] * 3600)
     for _ in range(max_pages):
         params = {"limit": 1000, "status": "open",
-                  "min_close_ts": int(now + cfg["min_minutes"] * 60),
+                  "min_close_ts": int(now + earliest),
                   "max_close_ts": int(now + cfg["max_hours"] * 3600)}
         if cursor:
             params["cursor"] = cursor
@@ -741,8 +746,10 @@ async def run_forever(logger=None, interval: Optional[int] = None) -> None:
                     universe = await fetch_universe(client, settings(), now)
                     universe_ts = now
                     if logger:
+                        cfg = settings()
+                        n_ok = sum(1 for m in universe if quote_for(m, cfg, now))
                         logger.info(f"MAKER universe: {len(universe)} markets closing within "
-                                    f"{settings()['max_hours']:.0f}h")
+                                    f"{cfg['max_hours']:.0f}h; {n_ok} qualify right now")
                 stats = await run_cycle(client, logger, now, universe=universe)
                 if logger and any(stats.values()):
                     logger.info(f"MAKER cycle: {stats}")
