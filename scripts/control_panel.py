@@ -536,8 +536,9 @@ with tab_arb:
                  delta_color="off")
         cc.metric("Inconsistencies found", f"{ar.get('total', 0):,}")
         st.caption("'all YES ... list may be incomplete' is NOT riskless (an unlisted outcome could win), so "
-                   "judge only the other kinds. A real opportunity = a decent edge, 10+ sets available, and lasting "
-                   "more than a scan or two.")
+                   "judge only the other kinds. A real opportunity = a decent edge, 10+ sets available, lasting "
+                   "more than a scan or two, AND paying out soon: 10c locked up for a year is a 10%/year return, "
+                   "not free money.")
         if not ar["by_kind"].empty:
             st.dataframe(ar["by_kind"], hide_index=True, use_container_width=True,
                          column_config={"per_day": st.column_config.NumberColumn("per day", format="%.1f"),
@@ -550,4 +551,5 @@ with tab_arb:
             st.dataframe(ar["recent"], hide_index=True, use_container_width=True,
                          column_config={"edge_c": st.column_config.NumberColumn("edge (c/set)", format="%.1f"),
                                         "contracts": st.column_config.NumberColumn("sets available", format="%.0f"),
+                                        "days_to_payout": st.column_config.NumberColumn("pays out in (days)", format="%.0f"),
                                         "lasted_min": st.column_config.NumberColumn("lasted (min)", format="%.1f")})

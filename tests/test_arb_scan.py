@@ -80,3 +80,15 @@ def test_scan_tracks_episodes(tmp_path):
     assert k.loc["all NO (one winner at most)", "median_minutes"] == pytest.approx(0.5)
     r = rep["recent"]
     assert r[r["kind"].str.startswith("all NO")]["contracts"].iloc[0] == 50
+
+
+def test_ladders_of_different_teams_are_not_compared():
+    # One event, two teams: "Celtics top-3 seed" cheap vs "Knicks top-6 seed" expensive is NOT a ladder
+    cel = dict(m("SEED-BOS-3", .30, .72, "less", cap=3.5), title="Celtics seed", yes_sub_title="Celtics: top 3")
+    nyk = dict(m("SEED-NYK-6", .90, .12, "less", cap=6.5), title="Knicks seed", yes_sub_title="Knicks: top 6")
+    ev = {"event_ticker": "SEED", "mutually_exclusive": False, "markets": [cel, nyk]}
+    assert A.check_event(ev) == []
+    # but the same team's own ladder still is: top-6 YES .10 + top-3 NO .72 = .82 for a guaranteed $1
+    cel6 = dict(m("SEED-BOS-6", .10, .92, "less", cap=6.5), title="Celtics seed", yes_sub_title="Celtics: top 6")
+    o = A.check_event({"event_ticker": "SEED", "markets": [cel, cel6]})
+    assert len(o) == 1 and o[0]["legs"] == [("SEED-BOS-6", "yes", .10), ("SEED-BOS-3", "no", .72)]
