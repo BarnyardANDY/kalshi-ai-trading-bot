@@ -92,3 +92,18 @@ def test_ladders_of_different_teams_are_not_compared():
     cel6 = dict(m("SEED-BOS-6", .10, .92, "less", cap=6.5), title="Celtics seed", yes_sub_title="Celtics: top 6")
     o = A.check_event({"event_ticker": "SEED", "markets": [cel, cel6]})
     assert len(o) == 1 and o[0]["legs"] == [("SEED-BOS-6", "yes", .10), ("SEED-BOS-3", "no", .72)]
+
+
+def test_scan_streams_pages(tmp_path):
+    ev = {"event_ticker": "E1", "title": "t", "mutually_exclusive": True,
+          "markets": [m("E1-A", .50, .55), m("E1-B", .50, .55), m("E1-C", .50, .55)]}
+    pages = [{"events": [ev] * 200, "cursor": "c1"}, {"events": [{"event_ticker": "E9", "markets": []}], "cursor": ""}]
+
+    class C(FakeClient):
+        calls = 0
+
+        async def _make_authenticated_request(self, method, endpoint, params=None, require_auth=True):
+            C.calls += 1
+            return pages[C.calls - 1]
+    st = asyncio.run(A.scan_once(C(), 1000.0, str(tmp_path / "a.db")))
+    assert st["events"] == 201 and C.calls == 2 and st["found"] >= 1

@@ -194,8 +194,10 @@ def _conn(path: Optional[str] = None) -> sqlite3.Connection:
     return c
 
 
-async def fetch_events(client, max_pages: int = 60) -> List[Dict[str, Any]]:
-    out, cursor = [], None
+async def event_pages(client, max_pages: int = 60):
+    """Yield one page of events (with their markets) at a time, so a full scan of Kalshi
+    never sits in memory at once (holding it all ran a 2GB server out of memory)."""
+    cursor = None
     for _ in range(max_pages):
         params = {"status": "open", "with_nested_markets": "true", "limit": 200}
         if cursor:
@@ -203,21 +205,36 @@ async def fetch_events(client, max_pages: int = 60) -> List[Dict[str, Any]]:
         resp = await client._make_authenticated_request("GET", "/trade-api/v2/events", params=params,
                                                          require_auth=False)
         page = resp.get("events") or []
-        out.extend(page)
         cursor = resp.get("cursor")
+        del resp
+        yield page
         if not cursor or len(page) < 200:
             break
-    return out
+
+
+async def fetch_events(client, max_pages: int = 60) -> List[Dict[str, Any]]:
+    return [e async for page in event_pages(client, max_pages) for e in page]
 
 
 async def scan_once(client, now: float, path: Optional[str] = None, logger=None,
                     events: Optional[List[Dict[str, Any]]] = None) -> Dict[str, int]:
     t0 = time.time()
-    events = events if events is not None else await fetch_events(client)
     found: Dict[str, Dict[str, Any]] = {}
-    for ev in events:
-        for o in check_event(ev):
-            found[o["key"]] = o
+    n_ev = n_mk = 0
+
+    async def pages():
+        if events is not None:
+            yield events
+        else:
+            async for p in event_pages(client):
+                yield p
+
+    async for page in pages():
+        for ev in page:
+            n_ev += 1
+            n_mk += len(ev.get("markets") or [])
+            for o in check_event(ev):
+                found[o["key"]] = o
     with closing(_conn(path)) as c:
         c.row_factory = sqlite3.Row
         open_rows = {r["key"]: dict(r) for r in c.execute("SELECT * FROM opps WHERE open=1")}
@@ -250,10 +267,9 @@ async def scan_once(client, now: float, path: Optional[str] = None, logger=None,
         gone = [k for k in open_rows if k not in found]
         for k in gone:
             c.execute("UPDATE opps SET open=0 WHERE key=? AND first_seen=?", (k, open_rows[k]["first_seen"]))
-        n_mk = sum(len(e.get("markets") or []) for e in events)
-        c.execute("INSERT OR REPLACE INTO scans VALUES (?,?,?,?)", (now, len(events), n_mk, time.time() - t0))
+        c.execute("INSERT OR REPLACE INTO scans VALUES (?,?,?,?)", (now, n_ev, n_mk, time.time() - t0))
         c.commit()
-    return {"events": len(events), "found": len(found), "new": new, "closed": len(gone)}
+    return {"events": n_ev, "found": len(found), "new": new, "closed": len(gone)}
 
 
 async def run_forever(logger=None, interval: float = 30.0, path: Optional[str] = None) -> None:

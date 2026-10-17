@@ -90,3 +90,18 @@ def test_v2_universe_starts_after_pre_event_window():
             return {"markets": []}
     asyncio.run(MK.fetch_universe(C(), MK.settings(), NOW))
     assert seen["min_close_ts"] >= NOW + 4 * 3600
+
+
+def test_universe_pages_and_slims():
+    pages = [{"markets": [dict(wide(f"KXA-26OCT20T{i}-X"), rules_primary="long text " * 50) for i in range(1000)],
+              "cursor": "c"}, {"markets": [wide("KXB-26OCT20Z-Y")], "cursor": ""}]
+
+    class C:
+        n = 0
+
+        async def _make_authenticated_request(self, method, endpoint, params=None, require_auth=True):
+            C.n += 1
+            return pages[C.n - 1]
+    out = asyncio.run(MK.fetch_universe(C(), MK.settings(), NOW))
+    assert len(out) == 1001 and C.n == 2
+    assert "rules_primary" not in out[0] and MK.quote_for(out[0], V2, NOW) is not None

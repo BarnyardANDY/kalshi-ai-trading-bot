@@ -426,11 +426,23 @@ async def fetch_universe(client, cfg: Dict[str, Any], now: Optional[float] = Non
             resp = await client._make_authenticated_request("GET", "/trade-api/v2/markets", params=params,
                                                              require_auth=False)
         page = resp.get("markets") or []
-        out.extend(page)
         cursor = resp.get("cursor")
+        out.extend(slim(m) for m in page)     # keep only what we use: full market objects ran a 2GB server out of memory
+        del resp
         if not cursor or len(page) < 1000:
             break
     return out
+
+
+KEEP_FIELDS = ("ticker", "event_ticker", "status", "close_time", "expected_expiration_time", "open_time", "title",
+               "yes_sub_title", "volume_24h_fp", "volume_24h", "yes_bid_dollars", "yes_ask_dollars", "no_bid_dollars",
+               "no_ask_dollars", "yes_bid", "yes_ask", "no_bid", "no_ask", "last_price_dollars", "last_price",
+               "previous_price_dollars", "previous_price", "open_interest_fp", "open_interest", "liquidity_dollars",
+               "liquidity", "result")
+
+
+def slim(m: Dict[str, Any]) -> Dict[str, Any]:
+    return {k: m[k] for k in KEEP_FIELDS if k in m}
 
 
 async def fetch_trades(client, ticker: str, since_ts: float, max_pages: int = 5) -> List[Dict[str, Any]]:
