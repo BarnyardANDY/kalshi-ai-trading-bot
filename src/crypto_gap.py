@@ -36,6 +36,7 @@ from datetime import datetime
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 DB_PATH = os.getenv("GAP_DB", "data/gap_study.db")
+REPORT_PATH = os.getenv("GAP_REPORT", "data/gap_report.json")   # written by the study itself; the dashboard just reads it
 TAKER_FEE_RATE = 0.07
 
 SERIES: Dict[str, Dict[str, str]] = {
@@ -280,6 +281,7 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
     trackers = {s: Tracker(s) for s in series}
     pending: Dict[str, Tuple[str, float, Optional[float]]] = {}   # ticker -> (series, close_ts, strike)
     last_outcome_check = 0.0
+    last_report = 0.0
     buffer: List[tuple] = []
     try:
         async with httpx.AsyncClient(timeout=2.0, headers={"User-Agent": "kalshi-gap-study"}) as http:
@@ -349,6 +351,10 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
                                     logger.info(f"GAP {tk} settled {res.upper()}")
                             elif time.time() - cts > 6 * 3600:
                                 pending.pop(tk)
+                    if time.time() - last_report > 600:
+                        last_report = time.time()
+                        # in a worker thread, so the 1-second sampling keeps going while it computes
+                        await asyncio.to_thread(write_report, path)
                 except Exception as e:
                     if logger:
                         logger.warning(f"GAP sample failed: {e}")
@@ -414,3 +420,28 @@ def report(path: Optional[str] = None, thresholds=(0.02, 0.05, 0.10), delays=(0,
         gaps.append(row)
     return {"samples": n_samples, "hours": hours, "markets_settled": len(outcomes),
             "calibration": calibration, "gaps": gaps}
+
+
+def write_report(path: Optional[str] = None, out: Optional[str] = None) -> Dict[str, Any]:
+    """Compute the report and save it as JSON for the dashboard (keeps the heavy work out of it)."""
+    import json
+    rep = report(path)
+    rep["computed_ts"] = time.time()
+    out = out or REPORT_PATH
+    d = os.path.dirname(out)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = out + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(rep, f)
+    os.replace(tmp, out)
+    return rep
+
+
+def read_report(out: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    import json
+    try:
+        with open(out or REPORT_PATH) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None

@@ -187,11 +187,9 @@ def maker_data(variant: str = "v1") -> Dict[str, Any]:
 
 
 def gap_study() -> Optional[Dict[str, Any]]:
+    """The gap study writes its own report every 10 minutes; reading it keeps the dashboard light."""
     from src import crypto_gap
-
-    if not os.path.exists(crypto_gap.DB_PATH):
-        return None
-    return crypto_gap.report()
+    return crypto_gap.read_report()
 
 
 def whale_study() -> Dict[str, Any]:

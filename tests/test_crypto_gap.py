@@ -130,3 +130,13 @@ def test_run_loop_with_fake_feeds(tmp_path, monkeypatch):
     assert len(rows) >= 3
     spot, n, strike, p, ask = rows[-1]
     assert spot == 67100.0 and n == 3 and strike == 67000.0 and p > 0.5 and ask == 0.50
+
+
+def test_report_written_and_read(tmp_path):
+    db = str(tmp_path / "g.db")
+    G._conn(db).close()
+    out = str(tmp_path / "r.json")
+    G.write_report(db, out)
+    r = G.read_report(out)
+    assert r["samples"] == 0 and "computed_ts" in r
+    assert G.read_report(str(tmp_path / "missing.json")) is None

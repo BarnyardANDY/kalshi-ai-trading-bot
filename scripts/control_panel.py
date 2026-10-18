@@ -434,10 +434,11 @@ with tab_gap:
     st.caption("Measurement only, no trading. Every second: bitcoin/ether/solana from Coinbase, Kraken and "
                "Bitstamp, and Kalshi's 15-minute up/down markets. A 'gap' is Kalshi's ask sitting below our fair "
                "value by more than the taker fee. The question: do gaps last long enough, and pay enough, for a "
-               "bot that reacts in 1-3 seconds? Runs as tmux session 'gap'. Refreshes every 10 minutes.")
+               "bot that reacts in 1-3 seconds? Runs as tmux session 'gap', which updates these numbers every 10 minutes.")
     g = _gap_report()
     if not g or not g["samples"]:
-        st.info("No data yet. On the server: tmux session 'gap' running `python cli.py gap-study`.")
+        st.info("No report yet. The gap study (tmux session 'gap', `python cli.py gap-study`) writes one "
+                "10 minutes after it starts.")
     else:
         a, b, cc = st.columns(3)
         a.metric("Hours recorded", f"{g['hours']:.1f}")
