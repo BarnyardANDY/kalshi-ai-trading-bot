@@ -2234,7 +2234,7 @@ def build_parser() -> argparse.ArgumentParser:
                     "1/5/30/60 minutes later and at settlement, and score copying them at the real ask + fee.",
     )
     p_wh.add_argument("--report", action="store_true", help="Print results so far and exit")
-    p_wh.add_argument("--min-notional", type=float, default=250.0, help="Smallest trade to record, in dollars")
+    p_wh.add_argument("--min-notional", type=float, default=1000.0, help="Smallest trade to record, in dollars")
     p_wh.set_defaults(func=cmd_whale_study)
 
     # --- arb-scan ---

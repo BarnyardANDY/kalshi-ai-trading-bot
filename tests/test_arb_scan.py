@@ -107,3 +107,13 @@ def test_scan_streams_pages(tmp_path):
             return pages[C.calls - 1]
     st = asyncio.run(A.scan_once(C(), 1000.0, str(tmp_path / "a.db")))
     assert st["events"] == 201 and C.calls == 2 and st["found"] >= 1
+
+
+def test_ladder_finds_best_non_adjacent_pair():
+    ev = {"event_ticker": "L", "markets": [m("L-50", .30, .72, "greater", floor=50),
+                                           m("L-55", .45, .57, "greater", floor=55),
+                                           m("L-60", .36, .62, "greater", floor=60)]}
+    legs = {tuple(o["legs"]) for o in A.check_event(ev)}
+    assert (("L-50", "yes", .30), ("L-60", "no", .62)) in legs
+    big = {"event_ticker": "B", "markets": [m(f"B-{i}", .5, .52, "greater", floor=i) for i in range(2000)]}
+    assert A.check_event(big) == []          # 2,000 rungs: one quick pass, nothing to find

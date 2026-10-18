@@ -48,7 +48,7 @@ st.markdown(
 )
 
 
-@st.cache_data(ttl=20)
+@st.cache_data(ttl=20, max_entries=1)
 def load_all():
     return {
         "trades": D.trades(),
@@ -425,7 +425,7 @@ with tab_maker:
 # ----------------------------------------------------------------------------
 # Speed gaps (15-minute crypto study)
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=600, max_entries=1)
 def _gap_report():
     return D.gap_study()
 
@@ -460,14 +460,14 @@ with tab_gap:
 # ----------------------------------------------------------------------------
 # Whale follow (separate study)
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=600, max_entries=1)
 def _whale():
     return D.whale_study()
 
 
 with tab_whale:
     st.caption("Measurement only, no trading, separate from every other test. Watches Kalshi's whole public "
-               "trade tape for unusually large trades ($250+), then asks: if you had copied each one ONE MINUTE "
+               "trade tape for unusually large trades ($1,000+), then asks: if you had copied each one ONE MINUTE "
                "LATE, at the real ask plus the taker fee, and held to settlement, would you have made money? "
                "Runs as tmux session 'whale'.")
     wd = _whale()
@@ -515,7 +515,7 @@ with tab_whale:
 # ----------------------------------------------------------------------------
 # Price inconsistencies (separate study)
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=300, max_entries=1)
 def _arb():
     return D.arb_scan()
 

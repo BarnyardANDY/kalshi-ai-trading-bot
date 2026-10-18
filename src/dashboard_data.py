@@ -199,8 +199,17 @@ def whale_study() -> Dict[str, Any]:
 
     if not os.path.exists(whale.DB_PATH):
         return {"features": pd.DataFrame(), "summary": {"events": 0}}
-    df = whale.features(whale.rows(), whale.series_meta())
-    return {"features": df, "summary": whale.summary(df)}
+    # Only what the tab shows: settled trades (for results) and the latest 300 (for the list).
+    # Loading every trade ever recorded made the dashboard the biggest program on the server.
+    import sqlite3
+    from contextlib import closing as _closing
+    with _closing(whale._conn()) as c:
+        total = c.execute("SELECT COUNT(*) FROM whales").fetchone()[0]
+    rows = whale.rows(where="WHERE pnl_copy IS NOT NULL OR id > (SELECT MAX(id) - 300 FROM whales)")
+    df = whale.features(rows, whale.series_meta())
+    sm = whale.summary(df)
+    sm["events"] = total
+    return {"features": df, "summary": sm}
 
 
 def arb_scan() -> Dict[str, Any]:

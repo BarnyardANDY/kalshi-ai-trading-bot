@@ -144,16 +144,28 @@ def subject_key(m: Dict[str, Any]) -> str:
 
 
 def _ladder_pairs(lad, direction, add) -> None:
-    """Every pair of rungs (sorted by strike) of one subject's ladder."""
-    for i in range(len(lad)):
-        for j in range(i + 1, len(lad)):
-            lo, hi = lad[i][0], lad[j][0]
-            if direction == "greater":     # above(lo) >= above(hi): YES lo + NO hi pays >= 1
-                legs = [(lo["ticker"], "yes", asks(lo)[0]), (hi["ticker"], "no", asks(hi)[1])]
-            else:                          # below(hi) >= below(lo): YES hi + NO lo pays >= 1
-                legs = [(hi["ticker"], "yes", asks(hi)[0]), (lo["ticker"], "no", asks(lo)[1])]
-            if all(0 < p < 1 for _, _, p in legs):
-                add(f"ladder ({'above' if direction == 'greater' else 'below'} X)", legs, 1.0)
+    """Cheapest riskless pair for each rung of one subject's ladder (sorted by strike).
+
+    Above-X: YES on a lower rung + NO on a higher rung pays >= $1, so for each higher rung we only
+    need the cheapest YES below it (one pass, instead of checking every pair: big ladders made the
+    all-pairs version eat a CPU core). Below-X is the mirror image.
+    """
+    if direction == "greater":
+        best = None                                   # (yes ask, ticker) cheapest so far among lower rungs
+        for m_, _ in lad:
+            ya, na = asks(m_)
+            if best and 0 < na < 1:
+                add("ladder (above X)", [(best[1], "yes", best[0]), (m_["ticker"], "no", na)], 1.0)
+            if 0 < ya < 1 and (best is None or ya < best[0]):
+                best = (ya, m_["ticker"])
+    else:
+        best = None                                   # cheapest NO among lower rungs
+        for m_, _ in lad:
+            ya, na = asks(m_)
+            if best and 0 < ya < 1:
+                add("ladder (below X)", [(m_["ticker"], "yes", ya), (best[1], "no", best[0])], 1.0)
+            if 0 < na < 1 and (best is None or na < best[0]):
+                best = (na, m_["ticker"])
 
 
 def depth_at_ask(book: Dict[str, Any], side: str, price: float) -> Optional[float]:
@@ -272,7 +284,7 @@ async def scan_once(client, now: float, path: Optional[str] = None, logger=None,
     return {"events": n_ev, "found": len(found), "new": new, "closed": len(gone)}
 
 
-async def run_forever(logger=None, interval: float = 30.0, path: Optional[str] = None) -> None:
+async def run_forever(logger=None, interval: float = 120.0, path: Optional[str] = None) -> None:
     from src.clients.kalshi_client import KalshiClient
 
     client = KalshiClient()

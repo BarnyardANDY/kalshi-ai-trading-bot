@@ -15,7 +15,7 @@ How it works:
 1. Poll Kalshi's global trade tape every few seconds.
 2. Group prints in the same market, same direction, within 1 second into one
    "whale event" (a big order usually sweeps several price levels at once).
-   Keep events of $250+ (cost to the buyer), so we can see where size starts to matter.
+   Keep events of $1,000+ (cost to the buyer); the size split shows where size starts to matter.
 3. Snapshot that market at +1 min (the copy price: the ask on the whale's side),
    +5, +30 and +60 min (did the price keep drifting the whale's way?), and the
    settlement result.
@@ -38,7 +38,7 @@ import pandas as pd
 
 DB_PATH = os.getenv("WHALE_DB", "data/whale_study.db")
 TAKER_FEE_RATE = 0.07
-MIN_NOTIONAL = float(os.getenv("WHALE_MIN_NOTIONAL", "250"))
+MIN_NOTIONAL = float(os.getenv("WHALE_MIN_NOTIONAL", "1000"))   # $250 logged ~200k trades/day: too heavy for 2GB
 GROUP_SECONDS = 1.0   # prints within 1 s of an order's FIRST print = one sweep (never chains steady flow)
 EXCLUDE_PREFIXES = ("KXMVE",)
 CHECKPOINTS = (("entry", 60), ("mid_5m", 300), ("mid_30m", 1800), ("mid_60m", 3600))
@@ -282,7 +282,8 @@ async def _markets(client, tickers: List[str]) -> Dict[str, Dict[str, Any]]:
 async def checkpoints(client, now: float, path: Optional[str] = None, logger=None) -> None:
     """Fill in the +1/5/30/60 minute snapshots that have come due (each within a 10-minute grace)."""
     jobs = []
-    for r in rows(path, "WHERE ts > ?", (now - 3600 - 900,)):
+    for r in rows(path, "WHERE ts > ? AND (entry_ask IS NULL OR mid_5m IS NULL OR mid_30m IS NULL OR mid_60m IS NULL)",
+                  (now - 3600 - 900,)):
         for col, lag in CHECKPOINTS:
             target = "entry_ask" if col == "entry" else col
             if r.get(target) is None and r["ts"] + lag <= now <= r["ts"] + lag + 600:
