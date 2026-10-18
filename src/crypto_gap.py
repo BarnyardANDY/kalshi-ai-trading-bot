@@ -282,6 +282,7 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
     pending: Dict[str, Tuple[str, float, Optional[float]]] = {}   # ticker -> (series, close_ts, strike)
     last_outcome_check = 0.0
     last_report = 0.0
+    report_task = None
     buffer: List[tuple] = []
     try:
         async with httpx.AsyncClient(timeout=2.0, headers={"User-Agent": "kalshi-gap-study"}) as http:
@@ -351,10 +352,10 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
                                     logger.info(f"GAP {tk} settled {res.upper()}")
                             elif time.time() - cts > 6 * 3600:
                                 pending.pop(tk)
-                    if time.time() - last_report > 600:
+                    if time.time() - last_report > 600 and (report_task is None or report_task.done()):
                         last_report = time.time()
                         # in a worker thread, so the 1-second sampling keeps going while it computes
-                        await asyncio.to_thread(write_report, path)
+                        report_task = asyncio.create_task(_report_safely(path, logger))
                 except Exception as e:
                     if logger:
                         logger.warning(f"GAP sample failed: {e}")
@@ -420,6 +421,16 @@ def report(path: Optional[str] = None, thresholds=(0.02, 0.05, 0.10), delays=(0,
         gaps.append(row)
     return {"samples": n_samples, "hours": hours, "markets_settled": len(outcomes),
             "calibration": calibration, "gaps": gaps}
+
+
+async def _report_safely(path: Optional[str], logger=None) -> None:
+    try:
+        rep = await asyncio.to_thread(write_report, path)
+        if logger:
+            logger.info(f"GAP report saved: {rep['samples']:,} samples, {rep['markets_settled']} markets settled")
+    except Exception as e:
+        if logger:
+            logger.warning(f"GAP report failed: {e!r}")
 
 
 def write_report(path: Optional[str] = None, out: Optional[str] = None) -> Dict[str, Any]:

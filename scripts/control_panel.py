@@ -522,7 +522,7 @@ def _arb():
 
 
 with tab_arb:
-    st.caption("Measurement only, no trading, separate from every other test. Every 30 seconds it checks every "
+    st.caption("Measurement only, no trading, separate from every other test. Every 2 minutes it checks every "
                "open Kalshi event for prices that can't all be right: buying every NO (or every YES) in a "
                "one-winner event, or two rungs of an 'above/below X' ladder, for less than the guaranteed payout "
                "after fees. 'Sets available' = how many it could actually have bought at those prices. "
