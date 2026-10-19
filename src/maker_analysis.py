@@ -40,6 +40,20 @@ DIMENSIONS: Dict[str, str] = {
     "Bid 1c better than best?": "improved_label",
 }
 
+# Only what is known when the order is POSTED: a strategy can choose on these. ("How it filled",
+# "price after fill" etc. are hindsight: useful to understand losses, useless for picking bets.)
+KNOWN_WHEN_POSTED = {k: v for k, v in DIMENSIONS.items() if v in (
+    "category", "series", "price_bucket", "daypart", "hour_et", "weekday", "spread_bucket", "queue_bucket",
+    "trend_24h", "volume_bucket", "side", "improved_label")}
+
+
+def search_every_split(df: pd.DataFrame, min_events: int = 30) -> Dict[str, Any]:
+    from src import edge_scan
+    if df is None or df.empty:
+        return {"tests": 0, "best": pd.DataFrame(), "passing": 0}
+    s = df[df["status"] == "settled"]
+    return edge_scan.scan(s, KNOWN_WHEN_POSTED, "c_per_contract", "event", min_clusters=min_events)
+
 
 def _cut(v: Optional[float], edges: List[float], labels: List[str]) -> Optional[str]:
     if v is None or (isinstance(v, float) and math.isnan(v)):

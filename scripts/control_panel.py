@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,32 @@ def load_all():
     }
 
 
+def show_search(res, what: str, key: str) -> None:
+    """The 'search every split' result: best-looking groups, judged honestly for how many were tried."""
+    from src import edge_scan
+    res = edge_scan.from_jsonable(res) if res and not isinstance(res.get("best"), pd.DataFrame) else (res or {})
+    tests = res.get("tests") or 0
+    if not tests:
+        st.info("Not enough settled data yet to search the splits (each group needs 30+ separate events).")
+        return
+    passing = res.get("passing", 0)
+    lucky = res.get("expected_by_luck", round(0.025 * tests, 1))
+    if passing:
+        st.success(f"{passing} group(s) still look positive after allowing for the {tests} groups tried. "
+                   f"Worth watching: if one stays positive as more {what} settle, it's a real lead.")
+    else:
+        st.warning(f"Tried {tests} groups (every split, and every pair of splits). {res.get('positive_95', 0)} looked "
+                   f"positive at the usual 95% bar, about what luck alone produces ({lucky}). None survive once "
+                   f"you allow for how many were tried: no hidden pocket of profit so far.")
+    best = res["best"]
+    if isinstance(best, pd.DataFrame) and not best.empty:
+        st.dataframe(best[["split", "group", "bets", "events", "c_per_contract", "margin_95", "95% sure",
+                           "survives the search"]],
+                     hide_index=True, use_container_width=True,
+                     column_config={"c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                    "margin_95": st.column_config.NumberColumn("± (¢)", format="%.1f")})
+
+
 def money(x: float) -> str:
     return f"{'-' if x < 0 else '+'}${abs(x):,.2f}"
 
@@ -96,6 +123,8 @@ if mins is None:
     s1.metric("Bot", "no log found")
 elif mins < 30:  # a full scan of every niche can take ~20 minutes
     s1.metric("Bot", "● running", f"active {mins:.0f} min ago", delta_color="off")
+elif status.get("session_running") is False:
+    s1.metric("Bot", "○ off", f"stopped; last ran {mins / 60:.0f}h ago", delta_color="off")
 else:
     s1.metric("Bot", "⚠ stalled?", f"last activity {mins:.0f} min ago", delta_color="off")
 s2.metric("Mode", {"paper": "PAPER", "LIVE": "LIVE $"}.get(status["mode"], "unknown"))
@@ -408,6 +437,11 @@ with tab_maker:
                                    error_y=dict(type="data", array=top["margin"], visible=True),
                                    marker_color=["#2ecc71" if v > 0 else "#e74c3c" for v in top["c_per_contract"]]))
             st.plotly_chart(chart_layout(fig, 280), use_container_width=True)
+        st.markdown("#### Search every split for an edge")
+        st.caption("Tries every split above that is known when the order is posted (not hindsight like 'how it "
+                   "filled'), and every PAIR of them, e.g. 'sports × evening'. Trying hundreds of groups always "
+                   "turns up a few that look good by luck, so a group only counts if it survives that.")
+        show_search(MA.search_every_split(feats), "bets", key=f"search_{'v2' if v2 else 'v1'}")
         if not feats.empty:
             st.download_button("Download every order (CSV)", feats.to_csv(index=False).encode(),
                                file_name=f"maker_{'v2' if v2 else 'v1'}_orders.csv", mime="text/csv",
@@ -455,13 +489,42 @@ with tab_gap:
         st.caption("For each gap: buy the cheap side at the ask seen 0, 1, 3 or 10 seconds after the gap "
                    "appeared, pay the fee, hold to settlement. Positive at 1-3s late = an edge a fast home-built "
                    "bot could chase. Positive only at 0s = only the fastest pros can get it.")
+        gap_cfg = {c: st.column_config.NumberColumn(format="%+.2f") for c in
+                   ("0s late: c/contract", "1s late: c/contract", "3s late: c/contract", "10s late: c/contract")}
+        gap_cfg.update({c: st.column_config.NumberColumn(format="%.2f") for c in
+                        ("0s late: ± (c)", "1s late: ± (c)", "3s late: ± (c)", "10s late: ± (c)")})
+        gap_cfg.update({"per day": st.column_config.NumberColumn(format="%.0f"),
+                        "median seconds": st.column_config.NumberColumn(format="%.1f"),
+                        "share lasting 3s+": st.column_config.NumberColumn(format="percent")})
         if g["gaps"]:
-            st.dataframe(pd.DataFrame(g["gaps"]), hide_index=True, use_container_width=True)
+            st.caption("± counts every gap on the same 15-minute market together (they share one outcome), so it's "
+                       "wider than a naive count would give, and honest.")
+            st.dataframe(pd.DataFrame(g["gaps"]), hide_index=True, use_container_width=True, column_config=gap_cfg)
+        if g.get("lag"):
+            st.markdown("#### 3. How fast does Kalshi catch up when the exchanges jump?")
+            st.caption(f"{g.get('jumps', 0):,} times our fair value jumped 4c+ in one second. For each: how much of "
+                       "that jump Kalshi's price had absorbed N seconds later, and how much of it our own fair "
+                       "value kept (if ours falls back, the jump was exchange noise, not news). A speed edge needs "
+                       "Kalshi to stay well behind for 1-3 seconds while ours holds.")
+            st.dataframe(pd.DataFrame(g["lag"]), hide_index=True, use_container_width=True,
+                         column_config={"share Kalshi has priced in": st.column_config.NumberColumn(format="percent"),
+                                        "share our fair value kept": st.column_config.NumberColumn(format="percent")})
+        if g.get("fast_gaps"):
+            st.markdown("#### 4. Pure speed gaps (Kalshi's own price + the exchanges' last 5 seconds)")
+            st.caption("Here the 'fair value' is Kalshi's own price 5 seconds ago, moved by however much the "
+                       "exchanges moved since. That removes our model's general disagreement with Kalshi: a gap only "
+                       "shows up when the exchanges just moved and Kalshi hasn't. This is the Dexter's Lab trade "
+                       "in its purest form.")
+            st.dataframe(pd.DataFrame(g["fast_gaps"]), hide_index=True, use_container_width=True, column_config=gap_cfg)
+        if g.get("gaps_split"):
+            st.markdown("#### 5. The 5c gaps, split by coin, time left and side")
+            st.dataframe(pd.DataFrame(g["gaps_split"]), hide_index=True, use_container_width=True,
+                         column_config=gap_cfg)
 
 # ----------------------------------------------------------------------------
 # Whale follow (separate study)
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=600, max_entries=1)
+@st.cache_data(ttl=120, max_entries=1)
 def _whale():
     return D.whale_study()
 
@@ -472,11 +535,14 @@ with tab_whale:
                "LATE, at the real ask plus the taker fee, and held to settlement, would you have made money? "
                "Runs as tmux session 'whale'.")
     wd = _whale()
-    sm, wf = wd["summary"], wd["features"]
+    sm, wl = wd["summary"], wd["latest"]
     if not sm.get("events"):
-        st.info("No whale trades recorded yet. On the server: tmux session 'whale' running "
-                "`python cli.py whale-study`.")
+        st.info("No whale report yet. The whale study (tmux session 'whale', `python cli.py whale-study`) writes "
+                "one when it starts and every 10 minutes after.")
     else:
+        if wd.get("computed_ts"):
+            st.caption(f"Numbers as of {datetime.fromtimestamp(wd['computed_ts']).strftime('%a %H:%M')} "
+                       "(the study refreshes them every 10 minutes).")
         a, b, cc, d, e = st.columns(5)
         a.metric("Whale trades seen", f"{sm['events']:,}")
         b.metric("Settled", f"{sm.get('settled', 0):,}", f"{sm.get('markets', 0)} markets", delta_color="off")
@@ -488,30 +554,32 @@ with tab_whale:
                  "vs our copy price", delta_color="off")
         st.caption("'Price 30 min later' above zero means prices keep drifting the whale's way after you could "
                    "have copied: the signal survives the delay. Copy ¢/contract is the bottom line after fees.")
-        from src import whale as W
         st.markdown("#### Slice the results")
-        wdim = st.selectbox("Split by", list(W.DIMENSIONS), index=0, key="whale_dim")
-        wt = W.slice_table(wf, W.DIMENSIONS[wdim])
-        if wt.empty:
-            st.info("No settled whale trades yet. Most markets take hours to days to settle.")
-        else:
-            st.dataframe(wt, hide_index=True, use_container_width=True,
-                         column_config={"win rate": st.column_config.NumberColumn(format="percent"),
-                                        "avg copy price": st.column_config.NumberColumn(format="%.2f"),
-                                        "c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
-                                        "margin": st.column_config.NumberColumn("± margin (¢)", format="%.1f"),
-                                        "drift 30m (c)": st.column_config.NumberColumn(format="%+.2f")})
-        st.markdown("#### Latest whale trades")
-        show = wf.sort_values("ts", ascending=False)[["time_et", "ticker", "title", "side", "contracts", "notional",
-                                                        "vwap", "entry_ask", "drift_30m_c", "result", "copy_c"]].head(200)
-        st.dataframe(show, hide_index=True, use_container_width=True,
-                     column_config={"notional": st.column_config.NumberColumn("size ($)", format="dollar"),
-                                    "vwap": st.column_config.NumberColumn("whale price", format="%.2f"),
-                                    "entry_ask": st.column_config.NumberColumn("copy price (+1 min)", format="%.2f"),
-                                    "drift_30m_c": st.column_config.NumberColumn("30 min later (c)", format="%+.1f"),
-                                    "copy_c": st.column_config.NumberColumn("copy result (c)", format="%+.1f")})
-        st.download_button("Download whale trades (CSV)", wf.to_csv(index=False).encode(),
-                           file_name="whale_trades.csv", mime="text/csv", key="dl_whale")
+        slices = wd["slices"]
+        if slices:
+            wdim = st.selectbox("Split by", list(slices), index=0, key="whale_dim")
+            wt = slices[wdim]
+            if wt.empty:
+                st.info("No settled whale trades yet. Most markets take hours to days to settle.")
+            else:
+                st.dataframe(wt, hide_index=True, use_container_width=True,
+                             column_config={"win rate": st.column_config.NumberColumn(format="percent"),
+                                            "avg copy price": st.column_config.NumberColumn(format="%.2f"),
+                                            "c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                            "margin": st.column_config.NumberColumn("± margin (¢)", format="%.1f"),
+                                            "drift 30m (c)": st.column_config.NumberColumn(format="%+.2f")})
+        st.markdown("#### Search every split for an edge")
+        st.caption("Every split above, and every pair of them (e.g. '$25k+ × sports'), each group needing 50+ "
+                   "separate markets. Judged for how many groups were tried.")
+        show_search(wd.get("search"), "whale trades", key="search_whale")
+        if not wl.empty:
+            st.markdown("#### Latest whale trades")
+            st.dataframe(wl, hide_index=True, use_container_width=True,
+                         column_config={"notional": st.column_config.NumberColumn("size ($)", format="dollar"),
+                                        "vwap": st.column_config.NumberColumn("whale price", format="%.2f"),
+                                        "entry_ask": st.column_config.NumberColumn("copy price (+1 min)", format="%.2f"),
+                                        "drift_30m_c": st.column_config.NumberColumn("30 min later (c)", format="%+.1f"),
+                                        "copy_c": st.column_config.NumberColumn("copy result (c)", format="%+.1f")})
 
 # ----------------------------------------------------------------------------
 # Price inconsistencies (separate study)
@@ -545,8 +613,21 @@ with tab_arb:
                          column_config={"per_day": st.column_config.NumberColumn("per day", format="%.1f"),
                                         "median_edge_c": st.column_config.NumberColumn("median edge (c/set)", format="%.1f"),
                                         "median_minutes": st.column_config.NumberColumn("median minutes open", format="%.1f"),
+                                        "median_days_to_payout": st.column_config.NumberColumn("median days to payout", format="%.0f"),
                                         "with_10plus_sets": st.column_config.NumberColumn("with 10+ sets"),
                                         "profit_if_all_taken": st.column_config.NumberColumn("profit if all taken", format="dollar")})
+        st.markdown("#### Worth a look")
+        wk = ar.get("worth")
+        if wk is None or wk.empty:
+            st.info("Nothing yet that clears every bar: 2c+ edge per set, 10+ sets actually buyable, still there on "
+                    "a second scan, paying out within a month, and not the 'list may be incomplete' kind.")
+        else:
+            st.dataframe(wk, hide_index=True, use_container_width=True,
+                         column_config={"edge_c": st.column_config.NumberColumn("edge (c/set)", format="%.1f"),
+                                        "contracts": st.column_config.NumberColumn("sets available", format="%.0f"),
+                                        "days_to_payout": st.column_config.NumberColumn("pays out in (days)", format="%.0f"),
+                                        "lasted_min": st.column_config.NumberColumn("lasted (min)", format="%.1f"),
+                                        "profit_if_taken": st.column_config.NumberColumn("profit if taken", format="dollar")})
         if not ar["recent"].empty:
             st.markdown("#### Latest")
             st.dataframe(ar["recent"], hide_index=True, use_container_width=True,

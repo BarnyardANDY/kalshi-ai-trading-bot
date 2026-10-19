@@ -1542,25 +1542,37 @@ def cmd_gap_study(args: argparse.Namespace) -> None:
     from src import crypto_gap as G
 
     if args.report:
-        rep = G.report()
+        rep = G.write_report()          # also refreshes the dashboard's copy
+
+        def gap_line(g):
+            parts = [f"{g['gaps']:>28}: {g['count']:6d} gaps on {g['markets']:4d} mkts"]
+            for d in (0, 1, 3, 10):
+                v, m = g.get(f"{d}s late: c/contract"), g.get(f"{d}s late: ± (c)")
+                if v is not None:
+                    parts.append(f"{d}s {v:+.1f}c" + (f"±{m:.1f}" if m is not None else ""))
+            return "    " + " | ".join(parts)
         print("=" * 70)
         print("  SPEED-GAP STUDY: Kalshi 15-minute crypto markets (no trading)")
         print("=" * 70)
         print(f"  {rep['samples']:,} samples over {rep['hours']:.1f} hours; {rep['markets_settled']} markets settled")
         print("\n  Is our fair value as accurate as Kalshi's price? (Brier, lower = better)")
         for r in rep["calibration"]:
-            print(f"    {r['time left']:>14}: ours {r['our model Brier']:.4f} vs Kalshi {r['Kalshi price Brier']:.4f}"
+            print(f"    {r['time left']:>18}: ours {r['our model Brier']:.4f} vs Kalshi {r['Kalshi price Brier']:.4f}"
                   f"  ({r['samples']} samples)")
-        print("\n  Gaps where Kalshi's ask was below our fair value by more than the fee:")
+        print("\n  Gaps vs. our model (buy at the ask N seconds late, hold to settlement):")
         for g in rep["gaps"]:
-            parts = [f"{g['min edge after fee']:>4}: {g['gaps']} gaps"]
-            if g["median seconds"] is not None:
-                parts.append(f"median {g['median seconds']:.0f}s, {g['share lasting 3s+']:.0%} last 3s+")
-            for d in (0, 1, 3, 10):
-                v = g.get(f"{d}s late: c/contract")
-                if v is not None:
-                    parts.append(f"{d}s late {v:+.1f}c")
-            print("    " + " | ".join(parts))
+            print(gap_line(g))
+        print("\n  Pure speed gaps (Kalshi's own price 5s ago + the exchanges' move since):")
+        for g in rep.get("fast_gaps", []):
+            print(gap_line(g))
+        print(f"\n  How fast Kalshi follows a 4c+ one-second jump ({rep.get('jumps', 0):,} jumps):")
+        for r in rep.get("lag", []):
+            k, m = r["share Kalshi has priced in"], r["share our fair value kept"]
+            if k is not None:
+                print(f"    after {r['seconds after the jump']:>2}s: Kalshi priced in {k:.0%}, our jump kept {m:.0%}")
+        print("\n  5c gaps split:")
+        for g in rep.get("gaps_split", []):
+            print(gap_line(g))
         print()
         return
 
@@ -1587,26 +1599,28 @@ def cmd_whale_study(args: argparse.Namespace) -> None:
     from src import whale as W
 
     if args.report:
-        df = W.features(W.rows(), W.series_meta())
-        sm = W.summary(df)
+        rep = W.write_report()          # also refreshes the dashboard's copy
+        sm = rep["summary"]
         print("=" * 70)
         print("  WHALE-FOLLOW STUDY: copy every big trade 1 minute late (no trading)")
         print("=" * 70)
         print(f"  whale trades recorded {sm['events']}, settled {sm.get('settled', 0)} "
               f"across {sm.get('markets', 0)} markets")
         if sm.get("copy_c") is not None:
-            print(f"  copying them: {sm['copy_c']:+.2f} c/contract (+/- {sm['margin'] or 0:.1f}), "
+            print(f"  copying them: {sm['copy_c']:+.2f} c/contract (+/- {sm.get('margin') or 0:.1f}), "
                   f"win rate {sm['win_rate']:.0%}, avg copy price {sm['avg_entry']:.2f}")
         for lag in (5, 30, 60):
             v = sm.get(f"drift_{lag}m")
             if v is not None:
                 print(f"  price {lag:>2} min later vs our copy price: {v:+.2f} c")
-        t = W.slice_table(df, "size_bucket")
-        if not t.empty:
-            print("\n  by size:")
-            for _, r in t.iterrows():
-                print(f"    {r['group']:>10}: {r['whale trades']:5d} trades, {r['c_per_contract']:+.2f} c "
-                      f"(+/- {r['margin']:.1f}) {r['verdict']}")
+        for r in rep["slices"].get("Size of the trade ($)", []):
+            print(f"    {r['group']:>10}: {r['whale trades']:6d} trades, {r['c_per_contract']:+.2f} c "
+                  f"(+/- {r['margin']:.1f}) {r['verdict']}")
+        sr = rep.get("search") or {}
+        print(f"\n  searched {sr.get('tests', 0)} groups; {sr.get('positive_95', 0)} look positive at 95% "
+              f"(~{sr.get('expected_by_luck', 0)} expected by luck); {sr.get('passing', 0)} survive the search")
+        for r in (sr.get("best") or [])[:8]:
+            print(f"    {r['c_per_contract']:+6.2f}c ±{r['margin_95']:.1f} on {r['events']:5d} mkts  {r['split']}: {r['group']}")
         print()
         return
 

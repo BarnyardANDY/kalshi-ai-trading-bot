@@ -62,8 +62,8 @@ def test_report_end_to_end(tmp_path):
     c.execute("INSERT INTO outcomes VALUES ('T1','KXBTC15M',900,'yes',100.0)")
     c.commit()
     rep = G.report(db)
-    g5 = [g for g in rep["gaps"] if g["min edge after fee"] == "5c"][0]
-    assert g5["gaps"] == 1 and g5["median seconds"] == 5
+    g5 = [g for g in rep["gaps"] if g["gaps"] == "5c+ after fee"][0]
+    assert g5["count"] == 1 and g5["median seconds"] == 5 and g5["markets"] == 1
     assert g5["0s late: c/contract"] == pytest.approx(100 * (0.45 - G.taker_fee(0.55)))
     assert rep["calibration"][0]["samples"] > 0
 
@@ -140,3 +140,40 @@ def test_report_written_and_read(tmp_path):
     r = G.read_report(out)
     assert r["samples"] == 0 and "computed_ts" in r
     assert G.read_report(str(tmp_path / "missing.json")) is None
+
+
+def _ss(points):
+    """(ts, p_yes, yes_bid, yes_ask, tau) -> sample dicts for one ticker."""
+    return [{"ts": t, "ticker": "T", "series": "KXBTC15M", "p_yes": p, "yes_bid": b, "yes_ask": a, "tau": tau,
+             "no_ask": round(1 - b, 2) if b else None} for t, p, b, a, tau in points]
+
+
+def test_kalshi_lag_measures_catch_up_and_our_persistence():
+    pts = [(0, 0.50, 0.49, 0.51, 600), (1, 0.60, 0.49, 0.51, 599),   # we jump 10c; Kalshi still at 0.50
+           (2, 0.60, 0.53, 0.55, 598), (3, 0.60, 0.59, 0.61, 597)]  # Kalshi: 40% after 1 s, 100% after 2 s
+    j = G.kalshi_lag(_ss(pts), waits=(0, 1, 2))
+    assert len(j) == 1
+    assert j[0]["k0"] == pytest.approx(0.0) and j[0]["k1"] == pytest.approx(0.4) and j[0]["k2"] == pytest.approx(1.0)
+    assert j[0]["m2"] == pytest.approx(1.0)
+
+
+def test_kalshi_lag_ignores_small_moves_and_final_seconds():
+    assert G.kalshi_lag(_ss([(0, 0.50, 0.49, 0.51, 600), (1, 0.52, 0.49, 0.51, 599)])) == []
+    assert G.kalshi_lag(_ss([(0, 0.50, 0.49, 0.51, 60), (1, 0.70, 0.49, 0.51, 59)])) == []
+
+
+def test_anchored_samples_use_kalshi_mid_plus_our_move():
+    pts = [(t, 0.80 if t < 6 else 0.90, 0.49, 0.51, 600 - t) for t in range(10)]   # our model says 0.80 throughout
+    a = G.anchored_samples(_ss(pts), lag=5)
+    assert a[0]["p_yes"] is None                               # nothing 5 s earlier yet
+    assert a[5]["p_yes"] == pytest.approx(0.50)                # Kalshi's 0.50, our model unchanged: no gap
+    assert a[6]["p_yes"] == pytest.approx(0.60)                # our model +10c in the last 5 s
+
+
+def test_clustered_margin_counts_a_market_once():
+    same = [("A", 1.0)] * 50 + [("B", -1.0)] * 50              # two markets, perfectly correlated within each
+    _, m_clu, k = G._clustered(same)
+    assert k == 2 and m_clu > 100                              # huge: really just two bets
+    indep = [(str(i), 1.0 if i % 2 else -1.0) for i in range(100)]
+    _, m_ind, _ = G._clustered(indep)
+    assert m_ind < 25

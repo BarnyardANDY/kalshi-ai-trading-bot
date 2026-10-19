@@ -117,3 +117,17 @@ def test_ladder_finds_best_non_adjacent_pair():
     assert (("L-50", "yes", .30), ("L-60", "no", .62)) in legs
     big = {"event_ticker": "B", "markets": [m(f"B-{i}", .5, .52, "greater", floor=i) for i in range(2000)]}
     assert A.check_event(big) == []          # 2,000 rungs: one quick pass, nothing to find
+
+
+def test_report_worth_a_look_needs_size_repeat_and_soon(tmp_path):
+    db = str(tmp_path / "a.db")
+    mk = [m("E1-A", .50, .55), m("E1-B", .50, .55), m("E1-C", .50, .55)]
+    for x in mk:
+        x["close_time"] = "1970-01-03T00:00:00Z"                 # pays out ~2 days after the scan
+    ev = {"event_ticker": "E1", "title": "Who wins", "mutually_exclusive": True, "markets": mk}
+    c = FakeClient()
+    asyncio.run(A.scan_once(c, 1000.0, db, events=[ev]))
+    assert A.report(db)["worth"].empty                       # seen on one scan only
+    asyncio.run(A.scan_once(c, 1120.0, db, events=[ev]))
+    w = A.report(db)["worth"]
+    assert len(w) >= 1 and (w["contracts"] >= 10).all()

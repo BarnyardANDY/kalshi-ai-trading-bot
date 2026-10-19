@@ -235,3 +235,6 @@ data/gap_study.db
 data/maker_v2.db
 data/whale_study.db
 data/arb_scan.db
+data/gap_report.json
+data/whale_report.json
+data/*.json.tmp

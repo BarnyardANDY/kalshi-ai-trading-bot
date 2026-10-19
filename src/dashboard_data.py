@@ -193,21 +193,18 @@ def gap_study() -> Optional[Dict[str, Any]]:
 
 
 def whale_study() -> Dict[str, Any]:
+    """The whale study's own precomputed report (it rewrites it every 10 minutes).
+    Loading the raw trades here (hundreds of thousands) made the dashboard too heavy for the server."""
     from src import whale
-
-    if not os.path.exists(whale.DB_PATH):
-        return {"features": pd.DataFrame(), "summary": {"events": 0}}
-    # Only what the tab shows: settled trades (for results) and the latest 300 (for the list).
-    # Loading every trade ever recorded made the dashboard the biggest program on the server.
-    import sqlite3
-    from contextlib import closing as _closing
-    with _closing(whale._conn()) as c:
-        total = c.execute("SELECT COUNT(*) FROM whales").fetchone()[0]
-    rows = whale.rows(where="WHERE pnl_copy IS NOT NULL OR id > (SELECT MAX(id) - 300 FROM whales)")
-    df = whale.features(rows, whale.series_meta())
-    sm = whale.summary(df)
-    sm["events"] = total
-    return {"features": df, "summary": sm}
+    rep = whale.read_report()
+    if not rep:
+        return {"summary": {"events": 0}, "slices": {}, "search": None, "latest": pd.DataFrame(), "computed_ts": None}
+    latest = pd.DataFrame(rep.get("latest") or [])
+    if "time_et" in latest:
+        latest["time_et"] = pd.to_datetime(latest["time_et"], errors="coerce")
+    return {"summary": rep.get("summary") or {"events": 0},
+            "slices": {k: pd.DataFrame(v) for k, v in (rep.get("slices") or {}).items()},
+            "search": rep.get("search"), "latest": latest, "computed_ts": rep.get("computed_ts")}
 
 
 def arb_scan() -> Dict[str, Any]:
@@ -279,9 +276,22 @@ def _last_prediction_ts() -> Optional[float]:
         return None
 
 
+def tmux_session_running(name: str) -> Optional[bool]:
+    """True/False if tmux can tell us whether session ``name`` exists; None if tmux isn't available."""
+    import shutil
+    import subprocess
+    if not shutil.which("tmux"):
+        return None
+    try:
+        return subprocess.run(["tmux", "has-session", "-t", name], capture_output=True, timeout=3).returncode == 0
+    except Exception:
+        return None
+
+
 def bot_status(log_file: Optional[str] = None, prediction_ts: Optional[float] = None) -> Dict[str, Any]:
     """Last activity time and trading mode, from the bot's log and its predictions."""
-    out: Dict[str, Any] = {"last_activity": None, "minutes_ago": None, "mode": "unknown"}
+    out: Dict[str, Any] = {"last_activity": None, "minutes_ago": None, "mode": "unknown",
+                           "session_running": tmux_session_running("bot")}
     log_file = log_file or _bot_log()
     stamps = []
     if log_file:

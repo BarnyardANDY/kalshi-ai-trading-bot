@@ -38,6 +38,7 @@ import pandas as pd
 
 DB_PATH = os.getenv("WHALE_DB", "data/whale_study.db")
 TAKER_FEE_RATE = 0.07
+REPORT_PATH = os.getenv("WHALE_REPORT", "data/whale_report.json")   # written by the study; the dashboard just reads it
 MIN_NOTIONAL = float(os.getenv("WHALE_MIN_NOTIONAL", "1000"))   # $250 logged ~200k trades/day: too heavy for 2GB
 GROUP_SECONDS = 1.0   # prints within 1 s of an order's FIRST print = one sweep (never chains steady flow)
 EXCLUDE_PREFIXES = ("KXMVE",)
@@ -238,10 +239,19 @@ async def run_forever(logger=None, interval: float = 5.0, path: Optional[str] = 
     client = KalshiClient()
     tape = Tape(min_notional)
     last_settle = 0.0
+    last_report = 0.0
+    report_task = None
     try:
         while True:
             t0 = time.time()
             try:
+                if time.time() - last_report > 600 and (report_task is None or report_task.done()):
+                    from src import report_runner
+                    last_report = time.time()
+                    report_task = asyncio.create_task(report_runner.run(
+                        "src.whale", "WHALE", logger,
+                        env={"WHALE_DB": path, "WHALE_REPORT": os.path.join(os.path.dirname(path), "whale_report.json")}
+                        if path else None))
                 new = await tape.poll(client)
                 evs = tape.events(new, time.time())
                 if evs:
@@ -440,3 +450,61 @@ def slice_table(df: pd.DataFrame, col: str) -> pd.DataFrame:
                       if mean + margin < 0 else "too early to tell"})
     t = pd.DataFrame(rows_)
     return t.sort_values("c_per_contract", ascending=False).reset_index(drop=True) if not t.empty else t
+
+
+# ----------------------------------------------------------------------------
+# Precomputed report (so the dashboard never loads hundreds of thousands of rows)
+# ----------------------------------------------------------------------------
+
+_REPORT_COLS = ("id, ts, ticker, event, series, side, contracts, notional, vwap, prints, typical_count, close_ts, "
+                "entry_ask, mid_5m, mid_30m, mid_60m, result, pnl_copy")
+LATEST_COLS = ["time_et", "ticker", "title", "side", "contracts", "notional", "vwap", "entry_ask", "drift_30m_c",
+               "result", "copy_c"]
+
+
+def build_report(path: Optional[str] = None) -> Dict[str, Any]:
+    from src import edge_scan
+
+    text_cols = ("ticker", "event", "series", "side", "result")
+    with closing(_conn(path)) as c:
+        total = c.execute("SELECT COUNT(*) FROM whales").fetchone()[0]
+        # in chunks, with repeated text stored once: loading it all in one go needed ~4x the memory
+        parts = []
+        for ch in pd.read_sql(f"SELECT {_REPORT_COLS} FROM whales WHERE pnl_copy IS NOT NULL", c, chunksize=20000):
+            parts.append(ch.astype({k: "category" for k in text_cols}))
+        settled = pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(columns=_REPORT_COLS.split(", "))
+        del parts
+        settled = settled.astype({k: object for k in text_cols})
+        latest = pd.read_sql("SELECT * FROM whales ORDER BY id DESC LIMIT 200", c)
+    meta = series_meta(path)
+    df = features(settled, meta)
+    sm = summary(df)
+    sm["events"] = total
+    slices = {lab: slice_table(df, col).to_dict("records") for lab, col in DIMENSIONS.items()}
+    if not df.empty:
+        df["cluster"] = df["event"].fillna(df["ticker"])
+        # every split and pair, except 'series' (hundreds of market types x every other split = thousands
+        # of tiny groups; its own slice table above already covers it)
+        search = edge_scan.scan(df[df["pnl_copy"].notna()], {k: v for k, v in DIMENSIONS.items() if v != "series"},
+                                "copy_c", "cluster", min_clusters=50)
+    else:
+        search = {"tests": 0, "best": pd.DataFrame(), "passing": 0}
+    lf = features(latest, meta)
+    lt = lf[LATEST_COLS].to_dict("records") if not lf.empty else []
+    return {"summary": {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in sm.items()},
+            "slices": slices, "search": edge_scan.to_jsonable(search), "latest": lt,
+            "computed_ts": time.time(),
+            "summary_line": f"{total:,} whale trades, {sm.get('settled', 0):,} settled, "
+                            f"{search.get('tests', 0)} groups searched, {search.get('passing', 0)} survive"}
+
+
+def write_report(path: Optional[str] = None, out: Optional[str] = None) -> Dict[str, Any]:
+    from src import report_runner
+    rep = build_report(path)
+    report_runner.write_json(rep, out or REPORT_PATH)
+    return rep
+
+
+def read_report(out: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    from src import report_runner
+    return report_runner.read_json(out or REPORT_PATH)

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import os
 import re
 import sqlite3
@@ -249,22 +248,25 @@ async def scan_once(client, now: float, path: Optional[str] = None, logger=None,
                 found[o["key"]] = o
     with closing(_conn(path)) as c:
         c.row_factory = sqlite3.Row
-        open_rows = {r["key"]: dict(r) for r in c.execute("SELECT * FROM opps WHERE open=1")}
+        open_rows = {r["key"]: dict(r) for r in c.execute("SELECT key, first_seen FROM opps WHERE open=1")}
+    # order-book depth for brand-new findings, fetched BEFORE taking the database write lock
+    depth: Dict[str, Optional[float]] = {}
+    for k, o in found.items():
+        if k in open_rows or o["note"] == "list may be incomplete":   # not riskless anyway: skip the calls
+            continue
+        try:
+            depths = [depth_at_ask(await client.get_orderbook(t), side, p) for t, side, p in o["legs"]]
+            depth[k] = min(depths) if depths and all(d is not None for d in depths) else None
+        except Exception:
+            depth[k] = None
+    with closing(_conn(path)) as c:
         new = 0
         for k, o in found.items():
             if k in open_rows:
-                r = open_rows[k]
                 c.execute("UPDATE opps SET last_seen=?, scans=scans+1, best_edge=MAX(best_edge, ?) "
-                          "WHERE key=? AND first_seen=?", (now, o["edge"], k, r["first_seen"]))
+                          "WHERE key=? AND first_seen=?", (now, o["edge"], k, open_rows[k]["first_seen"]))
                 continue
-            contracts = None
-            if o["note"] != "list may be incomplete":     # not riskless anyway: skip the order-book calls
-                try:
-                    depths = [depth_at_ask(await client.get_orderbook(t), side, p) for t, side, p in o["legs"]]
-                    if depths and all(d is not None for d in depths):
-                        contracts = min(depths)
-                except Exception:
-                    contracts = None
+            contracts = depth.get(k)
             c.execute("INSERT INTO opps (key, kind, event, title, note, legs, first_seen, last_seen, scans, best_edge,"
                       " first_edge, contracts, open, close_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)",
                       (k, o["kind"], o["event"], o["title"][:200], o["note"], json.dumps(o["legs"]), now, now, 1,
@@ -310,32 +312,41 @@ async def run_forever(logger=None, interval: float = 120.0, path: Optional[str] 
 # Report
 # ----------------------------------------------------------------------------
 
+# A finding worth a human look: decent edge, real size, seen on 2+ scans, pays out within a month,
+# and not the "list may be incomplete" kind (an unlisted outcome could win, so it isn't riskless).
+WORTH_A_LOOK = {"min_edge": 0.02, "min_sets": 10, "min_scans": 2, "max_days": 31}
+
+
 def report(path: Optional[str] = None) -> Dict[str, Any]:
     if not os.path.exists(path or DB_PATH):
         return {"scans": 0}
     with closing(_conn(path)) as c:
-        c.row_factory = sqlite3.Row
-        opps = pd.DataFrame([dict(r) for r in c.execute("SELECT * FROM opps")])
+        # only the small columns; never the per-leg JSON, so this stays light however many findings pile up
+        opps = pd.read_sql("SELECT key, kind, event, title, note, first_seen, last_seen, scans, best_edge, first_edge,"
+                           " contracts, open, close_ts FROM opps", c)
         sc = c.execute("SELECT COUNT(*), MIN(ts), MAX(ts), AVG(seconds), AVG(events) FROM scans").fetchone()
     hours = ((sc[2] or 0) - (sc[1] or 0)) / 3600 if sc[0] else 0.0
-    out: Dict[str, Any] = {"scans": sc[0], "hours": hours, "scan_seconds": sc[3], "events_per_scan": sc[4],
-                           "by_kind": pd.DataFrame(), "recent": pd.DataFrame(), "total": 0}
+    out: Dict[str, Any] = {"scans": sc[0], "hours": hours, "scan_seconds": sc[3] or 0, "events_per_scan": sc[4] or 0,
+                           "by_kind": pd.DataFrame(), "recent": pd.DataFrame(), "worth": pd.DataFrame(), "total": 0}
     if opps.empty:
         return out
     opps["lasted_min"] = (opps["last_seen"] - opps["first_seen"]) / 60
     opps["edge_c"] = 100 * opps["best_edge"]
     opps["profit_if_taken"] = opps["first_edge"] * opps["contracts"].fillna(0)
     opps["seen_et"] = pd.to_datetime(opps["first_seen"], unit="s", utc=True).dt.tz_convert(TZ).dt.tz_localize(None)
-    if "close_ts" not in opps:
-        opps["close_ts"] = None
     opps["days_to_payout"] = (opps["close_ts"].astype(float) - opps["first_seen"]) / 86400
     days = max(hours / 24, 1 / 24)
     g = opps.groupby("kind").agg(found=("key", "size"), per_day=("key", lambda s: len(s) / days),
                                  median_edge_c=("edge_c", "median"), median_minutes=("lasted_min", "median"),
                                  with_10plus_sets=("contracts", lambda s: int((s.fillna(0) >= 10).sum())),
+                                 median_days_to_payout=("days_to_payout", "median"),
                                  profit_if_all_taken=("profit_if_taken", "sum")).reset_index()
+    w = WORTH_A_LOOK
+    worth = opps[(opps["note"] != "list may be incomplete") & (opps["best_edge"] >= w["min_edge"])
+                 & (opps["contracts"].fillna(0) >= w["min_sets"]) & (opps["scans"] >= w["min_scans"])
+                 & (opps["days_to_payout"].fillna(9999) <= w["max_days"])]
+    cols = ["seen_et", "kind", "event", "title", "note", "edge_c", "contracts", "days_to_payout", "lasted_min", "open"]
     out.update(total=len(opps), by_kind=g,
-               recent=opps.sort_values("first_seen", ascending=False)[
-                   ["seen_et", "kind", "event", "title", "note", "edge_c", "contracts", "days_to_payout", "lasted_min",
-                    "open"]].head(300))
+               recent=opps.sort_values("first_seen", ascending=False)[cols].head(300),
+               worth=worth.sort_values("profit_if_taken", ascending=False)[cols + ["profit_if_taken"]].head(50))
     return out

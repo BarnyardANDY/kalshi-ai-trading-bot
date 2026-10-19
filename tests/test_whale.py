@@ -114,3 +114,24 @@ def test_run_loop_records_whale(tmp_path, monkeypatch):
     asyncio.run(go())
     r = W.rows(db)
     assert len(r) == 1 and r[0]["side"] == "no" and r[0]["notional"] == pytest.approx(1050)
+
+
+def test_build_report_is_small_and_complete(tmp_path):
+    db = str(tmp_path / "w.db")
+    with W.closing(W._conn(db)) as con:
+        for i in range(120):
+            won = i % 3 != 0
+            con.execute("INSERT INTO whales (ts, ticker, event, series, title, side, contracts, notional, vwap, "
+                        "prints, typical_count, close_ts, entry_ask, mid_5m, mid_30m, mid_60m, result, pnl_copy) "
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (NOW + i, f"KXA-{i}", f"EV{i}", "KXA", "t", "yes", 3000, 2000.0, 0.66, 1, 10, NOW + 7200,
+                         0.67, 0.67, 0.68, 0.69, "yes" if won else "no", (1 if won else 0) - 0.67 - W.taker_fee(0.67)))
+        con.execute("INSERT INTO series_meta VALUES ('KXA', 'Sports', 'x')")
+        con.commit()
+    out = str(tmp_path / "rep.json")
+    rep = W.write_report(db, out)
+    assert rep["summary"]["events"] == 120 and rep["summary"]["settled"] == 120
+    assert set(rep["slices"]) == set(W.DIMENSIONS)
+    assert rep["search"]["tests"] > 0 and len(rep["latest"]) == 120
+    back = W.read_report(out)
+    assert back["summary"]["settled"] == 120 and "search" in back

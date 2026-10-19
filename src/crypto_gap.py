@@ -163,6 +163,80 @@ def simulate(ep: Dict[str, Any], samples: List[Dict[str, Any]], result: str, del
     return None
 
 
+def _mid(s: Dict[str, Any]) -> Optional[float]:
+    b, a = s.get("yes_bid"), s.get("yes_ask")
+    return (b + a) / 2 if b and a and 0 < b < a < 1 else None
+
+
+def kalshi_lag(samples: List[Dict[str, Any]], min_jump: float = 0.04,
+               waits: Tuple[int, ...] = (0, 1, 2, 3, 5, 10)) -> List[Dict[str, Any]]:
+    """Every sudden 1-second jump in our fair value (exchanges moved), and how much of that jump
+    Kalshi's mid had priced in 0..10 s later. Also how much of the jump our own fair value KEPT
+    (if it falls back, the jump was exchange noise, not news). One ticker, sorted by time."""
+    out = []
+    n = len(samples)
+    for i in range(1, n):
+        a, b = samples[i - 1], samples[i]
+        if a.get("p_yes") is None or b.get("p_yes") is None or not 0 < b["ts"] - a["ts"] <= 1.5:
+            continue
+        if (b.get("tau") or 0) < 90:
+            continue
+        jump = b["p_yes"] - a["p_yes"]
+        base = _mid(a)
+        if abs(jump) < min_jump or base is None:
+            continue
+        rec: Dict[str, Any] = {"ticker": b["ticker"], "series": b["series"], "jump": jump}
+        j = i
+        for w in waits:
+            while j < n and samples[j]["ts"] < b["ts"] + w:
+                j += 1
+            if j >= n or samples[j]["ts"] > b["ts"] + w + 2:
+                break
+            m = _mid(samples[j])
+            if m is not None:
+                rec[f"k{w}"] = (m - base) / jump
+            if samples[j].get("p_yes") is not None:
+                rec[f"m{w}"] = (samples[j]["p_yes"] - a["p_yes"]) / jump
+        out.append(rec)
+    return out
+
+
+def anchored_samples(samples: List[Dict[str, Any]], lag: float = 5.0) -> List[Dict[str, Any]]:
+    """Samples whose fair value is Kalshi's own mid ``lag`` seconds ago PLUS how much our model moved
+    since. Removes our model's standing disagreement with Kalshi: a gap only appears when the
+    exchanges have just moved and Kalshi hasn't followed yet (the 'speed' trade in its pure form)."""
+    out = []
+    j = 0
+    for s in samples:
+        while j + 1 < len(samples) and samples[j + 1]["ts"] <= s["ts"] - lag:
+            j += 1
+        a = samples[j]
+        if not (lag <= s["ts"] - a["ts"] <= lag + 3) or a.get("p_yes") is None or s.get("p_yes") is None:
+            out.append({**s, "p_yes": None})
+            continue
+        m = _mid(a)
+        fair = None if m is None else min(0.99, max(0.01, m + s["p_yes"] - a["p_yes"]))
+        out.append({**s, "p_yes": fair})
+    return out
+
+
+def _clustered(pnl: List[Tuple[str, float]]) -> Tuple[Optional[float], Optional[float], int]:
+    """(mean c/contract, 95% margin in c, markets) with every market's gaps counted together:
+    gaps on the same 15-minute market share one outcome, so they aren't independent bets."""
+    if not pnl:
+        return None, None, 0
+    n = len(pnl)
+    mean = sum(v for _, v in pnl) / n
+    by: Dict[str, float] = {}
+    for k, v in pnl:
+        by[k] = by.get(k, 0.0) + (v - mean)
+    k = len(by)
+    if n < 2 or k < 2:
+        return 100 * mean, None, k
+    var = sum(x * x for x in by.values()) / (n * n) * k / (k - 1)
+    return 100 * mean, 196 * math.sqrt(var), k
+
+
 # ----------------------------------------------------------------------------
 # Storage
 # ----------------------------------------------------------------------------
@@ -354,8 +428,12 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
                                 pending.pop(tk)
                     if time.time() - last_report > 600 and (report_task is None or report_task.done()):
                         last_report = time.time()
-                        # in a worker thread, so the 1-second sampling keeps going while it computes
-                        report_task = asyncio.create_task(_report_safely(path, logger))
+                        # in a separate low-priority process, so the 1-second sampling never waits on it
+                        from src import report_runner
+                        report_task = asyncio.create_task(report_runner.run(
+                            "src.crypto_gap", "GAP", logger,
+                            env={"GAP_DB": path, "GAP_REPORT": os.path.join(os.path.dirname(path), "gap_report.json")}
+                            if path else None))
                 except Exception as e:
                     if logger:
                         logger.warning(f"GAP sample failed: {e}")
@@ -372,7 +450,31 @@ async def run_forever(logger=None, interval: float = 1.0, series: Optional[List[
 # Report
 # ----------------------------------------------------------------------------
 
-def report(path: Optional[str] = None, thresholds=(0.02, 0.05, 0.10), delays=(0, 1, 3, 10)) -> Dict[str, Any]:
+def _tau_bucket(tau: Optional[float]) -> str:
+    if tau is None:
+        return "unknown"
+    return "final minute" if tau <= 60 else "1-5 min left" if tau <= 300 else "5-15 min left"
+
+
+COIN = {"KXBTC15M": "bitcoin", "KXETH15M": "ether", "KXSOL15M": "solana"}
+
+
+def _gap_rows(label: str, eps_all, hours: float, delays) -> Dict[str, Any]:
+    row: Dict[str, Any] = {"gaps": label, "count": len(eps_all),
+                           "per day": len(eps_all) / (hours / 24) if hours >= 1 else None,
+                           "markets": len({e["ticker"] for e, _ in eps_all}),
+                           "median seconds": statistics.median([e["duration"] for e, _ in eps_all]) if eps_all else None,
+                           "share lasting 3s+": (sum(1 for e, _ in eps_all if e["duration"] >= 3) / len(eps_all))
+                           if eps_all else None}
+    for d in delays:
+        mean, margin, _ = _clustered([(e["ticker"], sim[d]) for e, sim in eps_all if sim[d] is not None])
+        row[f"{d}s late: c/contract"] = mean
+        row[f"{d}s late: ± (c)"] = margin
+    return row
+
+
+def report(path: Optional[str] = None, thresholds=(0.02, 0.05, 0.10), delays=(0, 1, 3, 10),
+           fast_thresholds=(0.03, 0.05), waits=(0, 1, 2, 3, 5, 10)) -> Dict[str, Any]:
     with closing(_conn(path)) as c:
         c.row_factory = sqlite3.Row
         outcomes = {r["ticker"]: dict(r) for r in c.execute("SELECT * FROM outcomes")}
@@ -387,40 +489,65 @@ def report(path: Optional[str] = None, thresholds=(0.02, 0.05, 0.10), delays=(0,
             for tk in outcomes:
                 yield tk, [dict(r) for r in c2.execute("SELECT * FROM samples WHERE ticker=? ORDER BY ts", (tk,))]
 
-    # 1. Is our fair value as good as Kalshi's own price? (Brier, lower = better)
-    # 2. Gaps, collected in the same pass
     cal: Dict[str, List[Tuple[float, float]]] = {}
-    eps_by_th: Dict[float, List[Tuple[Dict[str, Any], Dict[int, Optional[float]]]]] = {th: [] for th in thresholds}
+    eps_by_th: Dict[float, list] = {th: [] for th in thresholds}
+    fast_by_th: Dict[float, list] = {th: [] for th in fast_thresholds}
+    jumps: List[Dict[str, Any]] = []
     for tk, ss in ticker_samples():
         res = outcomes[tk]["result"]
         for th in thresholds:
             for e in episodes(ss, th):
                 eps_by_th[th].append((e, {d: simulate(e, ss, res, d) for d in delays}))
+        anch = anchored_samples(ss)
+        for th in fast_thresholds:
+            for e in episodes(anch, th):
+                fast_by_th[th].append((e, {d: simulate(e, ss, res, d) for d in delays}))
+        jumps.extend(kalshi_lag(ss, waits=waits))
         y = 1.0 if res == "yes" else 0.0
         for s in ss[::15]:                                     # one sample per ~15 s
             if s["p_yes"] is None or not s["yes_bid"] or not s["yes_ask"]:
                 continue
-            b = "final minute" if s["tau"] <= 60 else "1-5 min left" if s["tau"] <= 300 else "5-15 min left"
             mid = (s["yes_bid"] + s["yes_ask"]) / 2
-            cal.setdefault(b, []).append(((s["p_yes"] - y) ** 2, (mid - y) ** 2))
+            for b in (_tau_bucket(s["tau"]), f"{COIN.get(s['series'], s['series'])}, any time"):
+                cal.setdefault(b, []).append(((s["p_yes"] - y) ** 2, (mid - y) ** 2))
     calibration = [{"time left": b, "samples": len(v), "our model Brier": sum(a for a, _ in v) / len(v),
                     "Kalshi price Brier": sum(m for _, m in v) / len(v)} for b, v in sorted(cal.items())]
 
-    gaps = []
-    for th in thresholds:
-        eps_all = eps_by_th[th]
-        row: Dict[str, Any] = {"min edge after fee": f"{th*100:.0f}c", "gaps": len(eps_all),
-                               "gaps per day": len(eps_all) / (hours / 24) if hours >= 1 else None,
-                               "median seconds": statistics.median([e["duration"] for e, _ in eps_all]) if eps_all else None,
-                               "share lasting 3s+": (sum(1 for e, _ in eps_all if e["duration"] >= 3) / len(eps_all)) if eps_all else None}
-        for d in delays:
-            pnl = [sim[d] for _, sim in eps_all if sim[d] is not None]
-            row[f"{d}s late: c/contract"] = 100 * sum(pnl) / len(pnl) if pnl else None
-            row[f"{d}s late: trades"] = len(pnl)
-            row[f"{d}s late: ± (c)"] = (196 * statistics.pstdev(pnl) / math.sqrt(len(pnl))) if len(pnl) > 1 else None
-        gaps.append(row)
+    # 2. gaps vs. our model (as before, now with honest per-market margins)
+    gaps = [_gap_rows(f"{th*100:.0f}c+ after fee", eps_by_th[th], hours, delays) for th in thresholds]
+    # 2b. the 5c gaps split by coin and time left: where (if anywhere) does it work?
+    mid_th = thresholds[1] if len(thresholds) > 1 else thresholds[0]
+    split = []
+    for name, keyf in (("coin", lambda e: COIN.get(e["series"], e["series"])),
+                       ("time left", lambda e: _tau_bucket(e.get("tau0"))),
+                       ("side bought", lambda e: e["side"].upper())):
+        groups: Dict[str, list] = {}
+        for e, sim in eps_by_th[mid_th]:
+            groups.setdefault(keyf(e), []).append((e, sim))
+        for g, lst in sorted(groups.items()):
+            r = _gap_rows(f"{name}: {g}", lst, hours, delays)
+            split.append(r)
+    # 3. fast-move gaps: Kalshi's own price as the baseline, plus the exchanges' move in the last 5 s
+    fast = [_gap_rows(f"fast move, {th*100:.0f}c+ after fee", fast_by_th[th], hours, delays)
+            for th in fast_thresholds]
+    # 4. how fast does Kalshi follow a sudden move on the exchanges?
+    lag = []
+    for w in waits:
+        ks = [max(-1.0, min(2.0, j[f"k{w}"])) for j in jumps if f"k{w}" in j]
+        ms = [max(-1.0, min(2.0, j[f"m{w}"])) for j in jumps if f"m{w}" in j]
+        lag.append({"seconds after the jump": w, "jumps": len(ks),
+                    "share Kalshi has priced in": sum(ks) / len(ks) if ks else None,
+                    "share our fair value kept": sum(ms) / len(ms) if ms else None})
+    best = None
+    for r in gaps + fast + split:
+        v, m = r.get("1s late: c/contract"), r.get("1s late: ± (c)")
+        if v is not None and m is not None and (best is None or v - m > best[0]):
+            best = (v - m, r["gaps"], v, m)
     return {"samples": n_samples, "hours": hours, "markets_settled": len(outcomes),
-            "calibration": calibration, "gaps": gaps}
+            "calibration": calibration, "gaps": gaps, "gaps_split": split, "fast_gaps": fast, "lag": lag,
+            "jumps": len(jumps),
+            "summary_line": f"{n_samples:,} samples, {len(outcomes)} markets settled, {len(jumps)} sudden moves"
+                            + (f"; best at 1s late: {best[1]} {best[2]:+.2f}c ±{best[3]:.2f}" if best else "")}
 
 
 async def _report_safely(path: Optional[str], logger=None) -> None:

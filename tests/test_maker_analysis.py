@@ -82,3 +82,14 @@ def test_slice_verdicts():
     assert t.loc["85-95c", "verdict"] == "clearly negative"
     assert t.loc["65-74c", "verdict"] == "too early to tell"
     assert set(MA.DIMENSIONS.values()) <= set(f.columns)
+
+
+def test_search_every_split_finds_a_real_pocket_and_skips_hindsight():
+    good = _settled(200, 0.60, lambda i: i % 10 < 8, "G")          # 80% wins at 60c
+    bad = _settled(200, 0.90, lambda i: i % 10 < 7, "B")
+    f = MA.features(good + bad, {})
+    r = MA.search_every_split(f)
+    assert r["passing"] >= 1
+    assert r["best"].iloc[0]["group"].startswith("55-64c")
+    assert "How it filled" not in " ".join(r["best"]["split"])     # hindsight splits are never searched
+    assert set(MA.KNOWN_WHEN_POSTED.values()) <= set(MA.DIMENSIONS.values())
