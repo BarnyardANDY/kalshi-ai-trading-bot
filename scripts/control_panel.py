@@ -140,8 +140,8 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
+tab_perf, tab_maker, tab_fav, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Favorites test", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
      "Open positions", "Learning", "Predictions"])
 
 # ----------------------------------------------------------------------------
@@ -462,6 +462,84 @@ with tab_maker:
                      column_config={"price": st.column_config.NumberColumn(format="%.2f"),
                                     "queue_ahead": st.column_config.NumberColumn("queue ahead", format="%.0f"),
                                     "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+
+# ----------------------------------------------------------------------------
+# Favorites paper test (separate study)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=120, max_entries=1)
+def _fav():
+    from src import favorites as F
+    return F.report()
+
+
+with tab_fav:
+    from src import favorites as F
+    st.caption("Paper only, separate from every other test. Buys (on paper) the favorite side of markets closing "
+               "in 6-24 hours when it costs 90-98c, one bet per market, at the real ask plus Kalshi's fee. "
+               "A second arm only buys after a $1,000+ trade on that favorite, one minute later. The idea came "
+               "from the whale study's split search; this checks it on fresh data only, under rules fixed in "
+               "advance. Runs as tmux session 'fav'.")
+    fr = _fav()
+    if not fr.get("started"):
+        st.info("Not started yet. On the server: tmux session 'fav' running `python cli.py favorites`.")
+    else:
+        st.markdown(f"**Day {fr['days']:.1f} of {F.VERDICT['min_days']}** · about "
+                    f"{fr['qualifying_per_scan']:.0f} markets qualify per scan. Verdict rule (fixed in advance): "
+                    f"after {F.VERDICT['min_days']} days and {F.VERDICT['min_events']} separate settled events, an arm "
+                    "passes only if its ¢/contract is above zero by more than its ± margin.")
+        for arm, label in F.ARMS.items():
+            sa = fr["arms"][arm]
+            st.markdown(f"#### {label}")
+            a, b, cc, d, e = st.columns(5)
+            a.metric("Paper bets", f"{sa['bets']:,}", f"{sa['settled']:,} settled", delta_color="off")
+            b.metric("Separate events", f"{sa['events']:,}", f"of {F.VERDICT['min_events']} needed", delta_color="off")
+            if sa.get("win_rate") is not None:
+                cc.metric("Win rate", f"{sa['win_rate']:.1%}", f"needs {sa['breakeven']:.1%} to break even",
+                          delta_color="off")
+                d.metric("¢ / contract", f"{sa['c_per_contract']:+.2f}¢",
+                         f"± {sa['margin']:.2f}¢" if sa.get("margin") is not None else None, delta_color="off")
+                e.metric("Losses", f"{sa['losses']:,}", f"P&L at 10/bet: {money(sa['pnl_10'])}", delta_color="off")
+            if sa["verdict"].startswith("PASSED"):
+                st.success(f"Verdict: {sa['verdict']}")
+            elif sa["verdict"].startswith("losing"):
+                st.error(f"Verdict: {sa['verdict']}")
+            else:
+                st.info(f"Verdict: {sa['verdict']}")
+        st.caption("Win rate vs. break-even is the whole story here: at ~95c you win ~5c most of the time and lose "
+                   "~95c when the favorite fails, so one loss erases ~19 wins. Wait for the event count before "
+                   "trusting any number.")
+        df = fr["df"]
+        done = df[df["result"].isin(["yes", "no"])].sort_values("settled_ts") if not df.empty else df
+        if not done.empty:
+            st.markdown("#### Equity (per contract, settled bets)")
+            fig = go.Figure()
+            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71")):
+                g = done[done["arm"] == arm]
+                if not g.empty:
+                    fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=arm,
+                                             line=dict(width=2, color=color)))
+            st.plotly_chart(chart_layout(fig, 260).update_layout(showlegend=True), use_container_width=True)
+            st.markdown("#### Split the results")
+            arm_pick = st.radio("Arm", list(F.ARMS), format_func=lambda a: F.ARMS[a], horizontal=True, key="fav_arm")
+            sp = fr["splits"].get(arm_pick) or {}
+            if sp:
+                lab = st.selectbox("Split by", list(sp), key="fav_split")
+                t = sp[lab]
+                if not t.empty:
+                    st.dataframe(t, hide_index=True, use_container_width=True,
+                                 column_config={"win_rate": st.column_config.NumberColumn("win rate", format="percent"),
+                                                "avg_price": st.column_config.NumberColumn("avg price", format="%.3f"),
+                                                "c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                                "margin": st.column_config.NumberColumn("± (¢)", format="%.2f")})
+        if not df.empty:
+            st.markdown("#### Latest paper bets")
+            show = df.sort_values("entered_ts", ascending=False)[
+                ["entered_et", "arm", "ticker", "title", "side", "price", "hours_left", "depth", "result", "c"]].head(200)
+            st.dataframe(show, hide_index=True, use_container_width=True,
+                         column_config={"price": st.column_config.NumberColumn(format="%.2f"),
+                                        "hours_left": st.column_config.NumberColumn("hours to close", format="%.1f"),
+                                        "depth": st.column_config.NumberColumn("buyable at price", format="%.0f"),
+                                        "c": st.column_config.NumberColumn("result (¢)", format="%+.1f")})
 
 # ----------------------------------------------------------------------------
 # Speed gaps (15-minute crypto study)

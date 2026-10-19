@@ -1594,6 +1594,47 @@ def cmd_gap_study(args: argparse.Namespace) -> None:
         print("\nGap study stopped.")
 
 
+def cmd_favorites(args: argparse.Namespace) -> None:
+    """Favorites paper test (measurement only, never trades). See src/favorites.py."""
+    from src import favorites as F
+
+    if args.report:
+        rep = F.report()
+        print("=" * 70)
+        print("  FAVORITES PAPER TEST: buy 90-98c favorites 6-24h before close (no trading)")
+        print("=" * 70)
+        if not rep.get("started"):
+            print("  Not started yet: run `python cli.py favorites` in tmux session 'fav'.\n")
+            return
+        print(f"  running {rep['days']:.1f} days; ~{rep['qualifying_per_scan']:.0f} qualifying markets per scan")
+        for arm, label in F.ARMS.items():
+            st = rep["arms"][arm]
+            line = f"  {label}: {st['bets']} bets, {st['settled']} settled on {st['events']} events"
+            if st.get("c_per_contract") is not None:
+                line += (f", win {st['win_rate']:.1%} (needs {st['breakeven']:.1%}), "
+                         f"{st['c_per_contract']:+.2f}c/contract ±{st['margin'] or 0:.2f}")
+            print(line)
+            print(f"      verdict: {st['verdict']}")
+        print()
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("favorites")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/favorites.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    print("Favorites paper test running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(F.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nFavorites test stopped.")
+
+
 def cmd_whale_study(args: argparse.Namespace) -> None:
     """Whale-follow study (measurement only). See src/whale.py."""
     from src import whale as W
@@ -2250,6 +2291,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_wh.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_wh.add_argument("--min-notional", type=float, default=1000.0, help="Smallest trade to record, in dollars")
     p_wh.set_defaults(func=cmd_whale_study)
+
+    p_fav = subparsers.add_parser(
+        "favorites", help="Paper test: buy 90-98c favorites 6-24h before close (never trades)")
+    p_fav.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_fav.set_defaults(func=cmd_favorites)
 
     # --- arb-scan ---
     p_arb = subparsers.add_parser(

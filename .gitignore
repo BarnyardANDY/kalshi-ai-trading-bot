@@ -238,3 +238,4 @@ data/arb_scan.db
 data/gap_report.json
 data/whale_report.json
 data/*.json.tmp
+data/favorites.db
