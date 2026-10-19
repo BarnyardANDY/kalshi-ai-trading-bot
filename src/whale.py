@@ -483,10 +483,8 @@ def build_report(path: Optional[str] = None) -> Dict[str, Any]:
     slices = {lab: slice_table(df, col).to_dict("records") for lab, col in DIMENSIONS.items()}
     if not df.empty:
         df["cluster"] = df["event"].fillna(df["ticker"])
-        # every split and pair, except 'series' (hundreds of market types x every other split = thousands
-        # of tiny groups; its own slice table above already covers it)
-        search = edge_scan.scan(df[df["pnl_copy"].notna()], {k: v for k, v in DIMENSIONS.items() if v != "series"},
-                                "copy_c", "cluster", min_clusters=50)
+        # every split and pair ('series' alone only: see edge_scan.scan)
+        search = edge_scan.scan(df[df["pnl_copy"].notna()], DIMENSIONS, "copy_c", "cluster", min_clusters=50)
     else:
         search = {"tests": 0, "best": pd.DataFrame(), "passing": 0}
     lf = features(latest, meta)

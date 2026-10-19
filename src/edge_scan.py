@@ -38,8 +38,11 @@ def _cluster_stats(v: pd.Series, clusters: pd.Series) -> Tuple[float, float, int
 
 
 def scan(df: pd.DataFrame, dims: Dict[str, str], value_col: str, cluster_col: str,
-         min_clusters: int = 30, pairs: bool = True, top: int = 12) -> Dict[str, object]:
-    """Best groups across every split (and every pair of splits) of ``dims``.
+         min_clusters: int = 30, pairs: bool = True, top: int = 12,
+         solo: Tuple[str, ...] = ("series",)) -> Dict[str, object]:
+    """Best groups across every split (and every pair of splits) of ``dims``. Columns in ``solo``
+    (e.g. hundreds of market types) are tried on their own but never paired: paired, they make
+    thousands of tiny groups that can never pass and only slow things down.
 
     Returns {"tests": number of groups tried, "best": DataFrame, "passing": count that survive the search}.
     """
@@ -55,23 +58,40 @@ def scan(df: pd.DataFrame, dims: Dict[str, str], value_col: str, cluster_col: st
     d[cluster_col] = d[cluster_col].fillna("?").astype(str).astype("category")
     combos: List[Tuple[List[str], List[str]]] = [([lab], [col]) for lab, col in usable]
     if pairs:
-        combos += [([l1, l2], [c1, c2]) for (l1, c1), (l2, c2) in itertools.combinations(usable, 2)]
-    rows = []
+        combos += [([l1, l2], [c1, c2]) for (l1, c1), (l2, c2) in itertools.combinations(usable, 2)
+                   if c1 not in solo and c2 not in solo]
+    d = d.rename(columns={value_col: "_v", cluster_col: "_c"})
+    frames = []
     for labels, cols in combos:
-        for key, g in d.groupby(cols, dropna=False, observed=True):
-            key = key if isinstance(key, tuple) else (key,)
-            if any(str(k) in ("unknown", "nan", "None") for k in key):
-                continue
-            mean, se, k = _cluster_stats(g[value_col], g[cluster_col])
-            if k < min_clusters or not math.isfinite(se):
-                continue
-            rows.append({"split": " × ".join(labels),
-                         "group": " × ".join(str(x) for x in key),
-                         "bets": len(g), "events": k, "c_per_contract": mean, "margin_95": 1.96 * se,
-                         "z": mean / se if se > 0 else 0.0})
-    if not rows:
+        # All groups at once: first sum within each (group, event), then combine per group.
+        # (Looping over groups one by one took minutes on a small server.)
+        pc = d.groupby(cols + ["_c"], observed=True, dropna=False)["_v"].agg(["sum", "count"]).reset_index()
+        g = pc.groupby(cols, observed=True, dropna=False)
+        tot = g.agg(n=("count", "sum"), s=("sum", "sum"), k=("_c", "size"))
+        tot = tot[tot["k"] >= max(2, min_clusters)]
+        if tot.empty:
+            continue
+        pc = pc.join(tot[["n", "s"]], on=cols, how="inner")
+        pc["r2"] = (pc["sum"] - pc["count"] * pc["s"] / pc["n"]) ** 2     # each event's summed error, squared
+        tot["ss"] = pc.groupby(cols, observed=True, dropna=False)["r2"].sum()
+        tot["mean"] = tot["s"] / tot["n"]
+        tot["se"] = (tot["ss"] / tot["n"] ** 2 * tot["k"] / (tot["k"] - 1)) ** 0.5
+        tot = tot[tot["se"] > 0].reset_index()
+        keys = tot[cols].astype(str)
+        bad = keys.isin(["unknown", "nan", "None"]).any(axis=1)
+        tot, keys = tot[~bad], keys[~bad]
+        if tot.empty:
+            continue
+        frames.append(pd.DataFrame({
+            "split": " × ".join(labels),
+            "group": keys.agg(" × ".join, axis=1).values,
+            "bets": tot["n"].astype(int).values, "events": tot["k"].astype(int).values,
+            "c_per_contract": tot["mean"].values, "margin_95": 1.96 * tot["se"].values,
+            "z": (tot["mean"] / tot["se"]).values}))
+    rows = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    if rows.empty:
         return empty
-    t = pd.DataFrame(rows)
+    t = rows
     m = len(t)
     z_bar = NormalDist().inv_cdf(1 - 0.025 / m)          # Bonferroni: one-sided 2.5% shared across all tries
     t["95% sure"] = t["z"] > 1.96

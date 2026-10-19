@@ -90,6 +90,13 @@ def show_search(res, what: str, key: str) -> None:
                                     "margin_95": st.column_config.NumberColumn("± (¢)", format="%.1f")})
 
 
+@st.cache_data(ttl=600, max_entries=2)
+def _maker_search(variant: str):
+    """Cached: the search reads every settled bet, so don't redo it on every click."""
+    from src import maker_analysis as MA
+    return MA.search_every_split(D.maker_data(variant)["features"])
+
+
 def money(x: float) -> str:
     return f"{'-' if x < 0 else '+'}${abs(x):,.2f}"
 
@@ -441,7 +448,7 @@ with tab_maker:
         st.caption("Tries every split above that is known when the order is posted (not hindsight like 'how it "
                    "filled'), and every PAIR of them, e.g. 'sports × evening'. Trying hundreds of groups always "
                    "turns up a few that look good by luck, so a group only counts if it survives that.")
-        show_search(MA.search_every_split(feats), "bets", key=f"search_{'v2' if v2 else 'v1'}")
+        show_search(_maker_search("v2" if v2 else "v1"), "bets", key=f"search_{'v2' if v2 else 'v1'}")
         if not feats.empty:
             st.download_button("Download every order (CSV)", feats.to_csv(index=False).encode(),
                                file_name=f"maker_{'v2' if v2 else 'v1'}_orders.csv", mime="text/csv",
