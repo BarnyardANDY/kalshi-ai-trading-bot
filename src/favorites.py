@@ -366,6 +366,7 @@ def _cut(v, edges, labels):
 
 SPLITS = {
     "Price paid": "price_bucket",
+    "Time of day bought (Eastern)": "daypart",
     "Category": "category",
     "Hours until close when bought": "hours_bucket",
     "Side bought": "side",
@@ -384,6 +385,9 @@ def features(df: pd.DataFrame) -> pd.DataFrame:
     df["cluster"] = df["event"].fillna(df["ticker"])
     t = pd.to_datetime(df["entered_ts"], unit="s", utc=True).dt.tz_convert(TZ).dt.tz_localize(None)
     df["entered_et"] = t
+    # same buckets as the whale study, so 'evening' means the same thing in both
+    df["daypart"] = t.dt.hour.map(lambda h: "night (0-6)" if h < 6 else "morning (6-12)" if h < 12
+                                  else "afternoon (12-18)" if h < 18 else "evening (18-24)")
     df["settled_et"] = pd.to_datetime(df["settled_ts"], unit="s", utc=True).dt.tz_convert(TZ).dt.tz_localize(None)
     return df
 

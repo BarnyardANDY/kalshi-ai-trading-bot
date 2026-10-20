@@ -118,3 +118,15 @@ def test_report_and_verdict(tmp_path):
 def test_never_trades():
     src = open(F.__file__).read()
     assert "place_order" not in src and "create_order" not in src
+
+
+def test_time_of_day_split_uses_eastern_time_and_whale_buckets():
+    import pandas as pd
+    # 23:30 UTC on Oct 20 = 19:30 Eastern (EDT) -> evening; 14:00 UTC = 10:00 Eastern -> morning
+    df = pd.DataFrame({"price": [0.95, 0.95], "hours_left": [12, 12], "depth": [50, 50], "pnl": [0.046, 0.046],
+                       "event": ["E1", "E2"], "ticker": ["E1-A", "E2-A"], "settled_ts": [None, None],
+                       "entered_ts": [pd.Timestamp("2026-10-20 23:30", tz="UTC").timestamp(),
+                                      pd.Timestamp("2026-10-20 14:00", tz="UTC").timestamp()]})
+    f = F.features(df)
+    assert list(f["daypart"]) == ["evening (18-24)", "morning (6-12)"]
+    assert F.SPLITS["Time of day bought (Eastern)"] == "daypart"
