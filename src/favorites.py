@@ -447,7 +447,7 @@ def simulate_bankroll(g: pd.DataFrame, start: float, share: float = BET_SHARE) -
     cash, held, peak, max_drop, sizes = float(start), {}, float(start), 0.0, []
     curve = []
     for ts, kind, r in evs:
-        key = (r.arm, r.ticker)
+        key = getattr(r, "id", None) or (r.arm, r.ticker)     # whale copies repeat tickers: use the row id
         if kind == 0:
             per = r.price + fee_per_contract(r.price, 1)
             n = int(share * start // per)

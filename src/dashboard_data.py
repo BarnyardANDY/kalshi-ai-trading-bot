@@ -198,13 +198,15 @@ def whale_study() -> Dict[str, Any]:
     from src import whale
     rep = whale.read_report()
     if not rep:
-        return {"summary": {"events": 0}, "slices": {}, "search": None, "latest": pd.DataFrame(), "computed_ts": None}
+        return {"summary": {"events": 0}, "slices": {}, "search": None, "latest": pd.DataFrame(), "computed_ts": None,
+                "bankroll": []}
     latest = pd.DataFrame(rep.get("latest") or [])
     if "time_et" in latest:
         latest["time_et"] = pd.to_datetime(latest["time_et"], errors="coerce")
     return {"summary": rep.get("summary") or {"events": 0},
             "slices": {k: pd.DataFrame(v) for k, v in (rep.get("slices") or {}).items()},
-            "search": rep.get("search"), "latest": latest, "computed_ts": rep.get("computed_ts")}
+            "search": rep.get("search"), "latest": latest, "computed_ts": rep.get("computed_ts"),
+            "bankroll": rep.get("bankroll") or []}
 
 
 def arb_scan() -> Dict[str, Any]:

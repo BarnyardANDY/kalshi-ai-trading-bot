@@ -135,3 +135,32 @@ def test_build_report_is_small_and_complete(tmp_path):
     assert rep["search"]["tests"] > 0 and len(rep["latest"]) == 120
     back = W.read_report(out)
     assert back["summary"]["settled"] == 120 and "search" in back
+
+
+def test_group_bankrolls_replays_surviving_groups(tmp_path):
+    import pandas as pd
+    from src import favorites as F
+    db = str(tmp_path / "w.db")
+    with W.closing(W._conn(db)) as con:
+        for i in range(300):
+            fav = i % 2 == 0                                   # half at 95c (wins 99%), half at 60c (coin flips)
+            p = 0.95 if fav else 0.60
+            won = (i % 200 != 0) if fav else (i % 4 == 1)
+            con.execute("INSERT INTO whales (ts, ticker, event, series, title, side, contracts, notional, vwap, "
+                        "prints, typical_count, close_ts, entry_ask, mid_5m, mid_30m, mid_60m, result, pnl_copy, "
+                        "settled_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (NOW + i * 600, f"KXA-{i}", f"EV{i}", "KXA", "t", "yes", 3000, 2000.0, p, 1, 10,
+                         NOW + i * 600 + 12 * 3600, p, p, p, p, "yes" if won else "no",
+                         (1 if won else 0) - p - W.taker_fee(p), NOW + i * 600 + 12 * 3600))
+        con.commit()
+    df = W.features(W.rows(db), {})
+    df["cluster"] = df["event"]
+    best = pd.DataFrame([{"split": "Price the whale paid × Time until the market closes", "group": "90c+ × 6-24h",
+                          "survives the search": True},
+                         {"split": "Price the whale paid", "group": "50-74c", "survives the search": False}])
+    out = W.group_bankrolls(df, {"best": best})
+    assert len(out) == 1 and out[0]["group"] == "90c+ × 6-24h"
+    sims = out[0]["sims"]
+    assert set(sims) == {str(b) for b in F.BANKROLLS}
+    assert sims["100"]["taken"] > 0 and sims["100"]["value"] > 100           # 99% winners at 95c
+    assert "curve" not in sims["100"]

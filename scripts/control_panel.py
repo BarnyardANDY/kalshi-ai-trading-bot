@@ -693,6 +693,27 @@ with tab_whale:
         st.caption("Every split above, and every pair of them (e.g. '$25k+ × sports'), each group needing 50+ "
                    "separate markets. Judged for how many groups were tried.")
         show_search(wd.get("search"), "whale trades", key="search_whale")
+        if wd.get("bankroll"):
+            st.markdown("#### If you'd copied the surviving groups with real money")
+            st.caption("Every whale trade in each surviving group, copied one minute late at the real ask, replayed in "
+                       "order from the start of the study: 5% of the starting amount per copy, cash returning at "
+                       "settlement, Kalshi's fee per order size. Settled copies only. CAUTION: these groups were "
+                       "found by searching this same data, so this flatters them; the Favorites test tab is the "
+                       "honest check on fresh data.")
+            rows_g = []
+            for gb in wd["bankroll"]:
+                for b, r in gb["sims"].items():
+                    rows_g.append({"group": f"{gb['split']}: {gb['group']}", "started with": r["start"],
+                                   "now": r["value"], "P&L": r["pnl"], "return": r["ret"], "worst drop": -r["max_drop"],
+                                   "copies taken": r["taken"], "skipped (cash tied up)": r["skipped"],
+                                   "avg contracts": r["contracts_per_bet"]})
+            st.dataframe(pd.DataFrame(rows_g), hide_index=True, use_container_width=True,
+                         column_config={"started with": st.column_config.NumberColumn(format="dollar"),
+                                        "now": st.column_config.NumberColumn(format="dollar"),
+                                        "P&L": st.column_config.NumberColumn(format="dollar"),
+                                        "return": st.column_config.NumberColumn(format="percent"),
+                                        "worst drop": st.column_config.NumberColumn(format="dollar"),
+                                        "avg contracts": st.column_config.NumberColumn(format="%.1f")})
         if not wl.empty:
             st.markdown("#### Latest whale trades")
             st.dataframe(wl, hide_index=True, use_container_width=True,

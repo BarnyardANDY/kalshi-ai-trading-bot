@@ -457,7 +457,7 @@ def slice_table(df: pd.DataFrame, col: str) -> pd.DataFrame:
 # ----------------------------------------------------------------------------
 
 _REPORT_COLS = ("id, ts, ticker, event, series, side, contracts, notional, vwap, prints, typical_count, close_ts, "
-                "entry_ask, mid_5m, mid_30m, mid_60m, result, pnl_copy")
+                "entry_ask, mid_5m, mid_30m, mid_60m, result, pnl_copy, settled_ts")
 LATEST_COLS = ["time_et", "ticker", "title", "side", "contracts", "notional", "vwap", "entry_ask", "drift_30m_c",
                "result", "copy_c"]
 
@@ -487,13 +487,42 @@ def build_report(path: Optional[str] = None) -> Dict[str, Any]:
         search = edge_scan.scan(df[df["pnl_copy"].notna()], DIMENSIONS, "copy_c", "cluster", min_clusters=50)
     else:
         search = {"tests": 0, "best": pd.DataFrame(), "passing": 0}
+    bankroll = group_bankrolls(df, search)
     lf = features(latest, meta)
     lt = lf[LATEST_COLS].to_dict("records") if not lf.empty else []
     return {"summary": {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in sm.items()},
-            "slices": slices, "search": edge_scan.to_jsonable(search), "latest": lt,
+            "slices": slices, "search": edge_scan.to_jsonable(search), "latest": lt, "bankroll": bankroll,
             "computed_ts": time.time(),
             "summary_line": f"{total:,} whale trades, {sm.get('settled', 0):,} settled, "
                             f"{search.get('tests', 0)} groups searched, {search.get('passing', 0)} survive"}
+
+
+def group_bankrolls(df: pd.DataFrame, search: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """For every group that survives the split search: what $100 / $500 / $1,000 would be after copying
+    each of its whale trades one minute late (same replay as the favorites tab). In-sample: these
+    groups were FOUND in this data, so this flatters them by construction."""
+    from src import favorites as F
+    best = search.get("best")
+    if df is None or df.empty or not isinstance(best, pd.DataFrame) or best.empty:
+        return []
+    out = []
+    label_to_col = dict(DIMENSIONS)
+    for row in best[best["survives the search"]].itertuples(index=False):
+        cols = [label_to_col.get(x) for x in row.split.split(" × ")]
+        vals = row.group.split(" × ")
+        if None in cols or len(cols) != len(vals):
+            continue
+        m = df["pnl_copy"].notna()
+        for c, v in zip(cols, vals):
+            m &= df[c].astype(str) == v
+        g = df[m]
+        bets = pd.DataFrame({"id": g["id"], "arm": row.group, "ticker": g["ticker"], "side": g["side"],
+                             "price": g["entry_ask"].astype(float), "depth": None, "entered_ts": g["ts"] + 60,
+                             "settled_ts": g["settled_ts"], "result": g["result"]})
+        sims = {b: F.simulate_bankroll(bets, b) for b in F.BANKROLLS}
+        out.append({"split": row.split, "group": row.group, "since": float(g["ts"].min()) if len(g) else None,
+                    "sims": {str(b): {k: v for k, v in r.items() if k != "curve"} for b, r in sims.items()}})
+    return out
 
 
 def write_report(path: Optional[str] = None, out: Optional[str] = None) -> Dict[str, Any]:
