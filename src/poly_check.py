@@ -61,6 +61,28 @@ def taker_fee(p: float) -> float:
     return TAKER_FEE_RATE * p * (1 - p) if 0 < p < 1 else 0.0
 
 
+# per-league codes that differ between the sites, mapped to one shared code (seen in the live probe:
+# Polymarket nhl-mon-stl / nhl-lak-chi / nhl-min-utah / nhl-ott-las vs Kalshi MTL, LA, UTA, VGK)
+LEAGUE_ALIASES: Dict[str, Dict[str, str]] = {
+    "nhl": {"mon": "mtl", "lak": "la", "utah": "uta", "las": "vgk", "vgs": "vgk", "nj": "njd", "tb": "tbl",
+            "sj": "sjs", "cls": "cbj", "wsh": "was", "lv": "vgk"},
+}
+
+
+def lnorm(league: str, code: str) -> str:
+    c = norm(code)
+    return LEAGUE_ALIASES.get(league, {}).get(c, c)
+
+
+def code_variants(league: str, code: str) -> List[str]:
+    """Every spelling of a team code that maps to the same team (for building page names)."""
+    canon = lnorm(league, code)
+    out = {code.lower(), norm(code), canon}
+    out |= {k for k, v in ALIASES.items() if v == canon}
+    out |= {k for k, v in LEAGUE_ALIASES.get(league, {}).items() if v == canon}
+    return sorted(out)
+
+
 def norm(code: str) -> str:
     c = (code or "").lower()
     return ALIASES.get(c, c)
@@ -142,6 +164,14 @@ def moneyline(ev: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def lnorm_any(code: str) -> str:
+    """Shared code under any league's aliases (team names are looked up per league, so this is safe)."""
+    c = norm(code)
+    for m in LEAGUE_ALIASES.values():
+        c = m.get(c, c)
+    return c
+
+
 def _words(s: str) -> set:
     return {w for w in re.findall(r"[a-z]+", (s or "").lower()) if len(w) > 2}
 
@@ -156,7 +186,8 @@ def assign_outcomes(kteams: Dict[str, Dict[str, Any]], ml: Dict[str, Any],
     for code in codes:
         mk = kteams[code]
         # the market's OWN team name only: Kalshi's game title names both teams, so it can't tell them apart
-        hints = _words(team_names.get(code, "")) | _words(mk.get("yes_sub_title") or "")
+        hints = _words(team_names.get(code, "")) | _words(mk.get("yes_sub_title") or "") | \
+            _words(next((n for k, n in team_names.items() if k != code and lnorm_any(k) == lnorm_any(code)), ""))
         hits = [i for i, o in enumerate(outs) if _words(o) & hints or o in (team_names.get(code, "").lower())]
         if len(hits) == 1:
             pick[code] = hits[0]
@@ -280,7 +311,7 @@ async def poly_events_by_slug(http, league: str, kal_evs: List[Dict[str, Any]], 
         if not 0 <= (d0 - today).days <= days_ahead:
             continue
         raw = [((m.get("ticker") or "").rsplit("-", 1)[-1]).lower() for m in kp["teams"].values()]
-        codes = [sorted({c, norm(c)}) for c in raw]
+        codes = [code_variants(league, c) for c in raw]
         for d in (d0, d0.fromordinal(d0.toordinal() + 1)):
             for prefix in LEAGUES[league]["prefixes"]:
                 for a in codes[0]:
@@ -380,7 +411,8 @@ def match_games(poly_evs: List[Dict[str, Any]], kal_evs: List[Dict[str, Any]], l
     cand = []
     for pi, (pev, info) in enumerate(polys):
         for ki, (kev, kp) in enumerate(kparsed):
-            if info["teams"] == set(kp["teams"]) and dates_close(info["date"], kp["date"]):
+            if ({lnorm(league, t) for t in info["teams"]} == {lnorm(league, t) for t in kp["teams"]}
+                    and dates_close(info["date"], kp["date"])):
                 cand.append((0 if info["date"] == kp["date"] else 1, pi, ki))
     cand.sort()
     used_p, used_k, out = set(), set(), []

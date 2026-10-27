@@ -243,3 +243,27 @@ def test_lookup_by_game_page_name_when_tag_search_finds_nothing(tmp_path):
     asyncio.run(P.find_games(k, h2, "nfl"))
     asyncio.run(P.find_games(k, h2, "nfl"))
     assert len([c for c in h2.slug_calls if c]) <= len([c for c in h.slug_calls if c])
+
+
+def test_nhl_codes_that_differ_between_sites_still_match():
+    # seen live: Polymarket nhl-mon-stl / nhl-lak-chi / nhl-min-utah / nhl-ott-las vs Kalshi MTL, LA, UTA, VGK
+    k = [kev("KXNHLGAME-26OCT27MTLSTL", "MTL", "STL", a_name="Montreal"),
+         kev("KXNHLGAME-26OCT27LACHI", "LA", "CHI", a_name="Los Angeles"),
+         kev("KXNHLGAME-26OCT27MINUTA", "MIN", "UTA", a_name="Minnesota"),
+         kev("KXNHLGAME-26OCT27OTTVGK", "OTT", "VGK", a_name="Ottawa")]
+    p = [pev("nhl-mon-stl-2026-10-27", ["Canadiens", "Blues"], [0.6, 0.4], tokens=("m1", "m2")),
+         pev("nhl-lak-chi-2026-10-27", ["Kings", "Blackhawks"], [0.6, 0.4], tokens=("l1", "l2")),
+         pev("nhl-min-utah-2026-10-27", ["Wild", "Utah"], [0.6, 0.4], tokens=("u1", "u2")),
+         pev("nhl-ott-las-2026-10-27", ["Senators", "Golden Knights"], [0.6, 0.4], tokens=("o1", "o2"))]
+    names = {"mon": "Montreal Canadiens", "stl": "St. Louis Blues", "lak": "Los Angeles Kings",
+             "chi": "Chicago Blackhawks", "min": "Minnesota Wild", "utah": "Utah Mammoth",
+             "ott": "Ottawa Senators", "las": "Vegas Golden Knights"}
+    found, st = P.match_games(p, k, "nhl", names)
+    assert st["matched"] == 4 and st["no_kalshi_match"] == 0
+    mtl = [f for f in found if f["kalshi_event"].endswith("MTLSTL")][0]
+    assert mtl["poly_token_a"] == "m1" and mtl["team_a"] == "mtl"          # Montreal = Canadiens
+
+
+def test_aliases_stay_in_their_league():
+    assert P.lnorm("nhl", "lak") == "la" and P.lnorm("nba", "lak") == "lak"
+    assert "mon" in P.code_variants("nhl", "MTL") and "lak" in P.code_variants("nhl", "LA")
