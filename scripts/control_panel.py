@@ -519,6 +519,42 @@ with tab_fav:
                     fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=arm,
                                              line=dict(width=2, color=color)))
             st.plotly_chart(chart_layout(fig, 260).update_layout(showlegend=True), use_container_width=True)
+
+            # ---- what real money would be now (paper replay) ----------------------
+            st.markdown("#### If you'd started with real money")
+            st.caption(f"A replay of every paper bet, in order, starting with each amount. Each bet uses up to "
+                       f"{F.BET_SHARE:.0%} of the starting amount, capped by the contracts actually for sale at our "
+                       "price and by the cash on hand (money comes back when a market settles; a bet with no cash "
+                       "free is skipped). Kalshi's fee is charged for each order's size. Open bets count at cost. "
+                       "Real orders usually do a bit worse than paper.")
+            bk = fr.get("bankroll") or {}
+            rows_bk = []
+            for arm, label in F.ARMS.items():
+                for b, r in (bk.get(arm) or {}).items():
+                    rows_bk.append({"arm": label, "started with": r["start"], "now": r["value"], "P&L": r["pnl"],
+                                    "return": r["ret"], "worst drop": -r["max_drop"],
+                                    "bets taken": r["taken"], "skipped (cash tied up)": r["skipped"],
+                                    "avg contracts per bet": r["contracts_per_bet"], "still open": r["open"]})
+            if rows_bk:
+                st.dataframe(pd.DataFrame(rows_bk), hide_index=True, use_container_width=True,
+                             column_config={"started with": st.column_config.NumberColumn(format="dollar"),
+                                            "now": st.column_config.NumberColumn(format="dollar"),
+                                            "P&L": st.column_config.NumberColumn(format="dollar"),
+                                            "return": st.column_config.NumberColumn(format="percent"),
+                                            "worst drop": st.column_config.NumberColumn(format="dollar"),
+                                            "avg contracts per bet": st.column_config.NumberColumn(format="%.1f")})
+                pick_b = st.radio("Show value over time for", list(F.BANKROLLS), horizontal=True,
+                                  format_func=lambda b: f"${b:,}", key="fav_bankroll")
+                fig = go.Figure()
+                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71")):
+                    cv = (bk.get(arm) or {}).get(pick_b, {}).get("curve") or []
+                    if cv:
+                        xs = pd.to_datetime([t for t, _ in cv], unit="s", utc=True).tz_convert("America/New_York").tz_localize(None)
+                        fig.add_trace(go.Scatter(x=xs, y=[v for _, v in cv], mode="lines", name=F.ARMS[arm],
+                                                 line=dict(width=2, color=color, shape="hv")))
+                fig.add_hline(y=pick_b, line_dash="dot", line_color="rgba(128,128,128,0.6)")
+                st.plotly_chart(chart_layout(fig, 280).update_layout(showlegend=True, yaxis_tickprefix="$"),
+                                use_container_width=True)
             st.markdown("#### Split the results")
             arm_pick = st.radio("Arm", list(F.ARMS), format_func=lambda a: F.ARMS[a], horizontal=True, key="fav_arm")
             sp = fr["splits"].get(arm_pick) or {}

@@ -130,3 +130,38 @@ def test_time_of_day_split_uses_eastern_time_and_whale_buckets():
     f = F.features(df)
     assert list(f["daypart"]) == ["evening (18-24)", "morning (6-12)"]
     assert F.SPLITS["Time of day bought (Eastern)"] == "daypart"
+
+
+def _bets(rows):
+    import pandas as pd
+    cols = ["arm", "ticker", "side", "price", "depth", "entered_ts", "settled_ts", "result"]
+    return pd.DataFrame([dict(zip(cols, r)) for r in rows])
+
+
+def test_bankroll_replay_sizes_bets_and_returns_cash():
+    # $100 at 5% = $5 a bet -> 5 contracts at 95c; fee for 5 at .95 = ceil(1.66c) = 2c total
+    g = _bets([("favorites", "A", "yes", 0.95, None, 0, 100, "yes"),
+               ("favorites", "B", "yes", 0.95, None, 10, 200, "no")])
+    r = F.simulate_bankroll(g, 100)
+    cost = 5 * 0.95 + 0.02
+    assert r["taken"] == 2 and r["contracts_per_bet"] == 5
+    assert r["value"] == pytest.approx(100 - cost + 5 - cost)
+    assert r["max_drop"] > 0 and r["open"] == 0
+
+
+def test_bankroll_replay_caps_at_available_size_and_skips_when_cash_is_tied_up():
+    g = _bets([("favorites", "A", "yes", 0.95, 2, 0, 50, "yes")])
+    r = F.simulate_bankroll(g, 100)
+    assert r["contracts_per_bet"] == 2 and r["capped"] == 1
+    many = _bets([("favorites", f"M{i}", "yes", 0.95, None, i, None, None) for i in range(30)])
+    r = F.simulate_bankroll(many, 100)                         # 5% each: cash runs out after ~20
+    assert r["taken"] < 30 and r["skipped"] == 30 - r["taken"] and r["open"] == r["taken"]
+    assert r["value"] == pytest.approx(100)                   # open bets count at cost
+
+
+def test_report_includes_bankrolls(tmp_path):
+    db = str(tmp_path / "f.db")
+    c = Fake([mk("E1-A", .94, .95)])
+    asyncio.run(F.scan_favorites(c, NOW, db))
+    rep = F.report(db)
+    assert set(rep["bankroll"]["favorites"]) == set(F.BANKROLLS)

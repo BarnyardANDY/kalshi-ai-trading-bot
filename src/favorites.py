@@ -423,6 +423,64 @@ def verdict(st: Dict[str, Any], days: float) -> str:
     return "no edge (positive margin not reached)"
 
 
+BANKROLLS = (100, 500, 1000)
+BET_SHARE = 0.05          # each bet uses up to 5% of the STARTING bankroll (no compounding)
+
+
+def simulate_bankroll(g: pd.DataFrame, start: float, share: float = BET_SHARE) -> Dict[str, Any]:
+    """Replay one arm's paper bets in time order with ``start`` dollars.
+
+    Each bet buys as many contracts as ``share`` of the starting bankroll pays for, capped by
+    the contracts actually offered at our price (when known) and by the cash on hand; Kalshi's
+    fee is charged for that order size. Cash comes back when the market settles; a bet with no
+    cash free is skipped. Open bets count at what they cost."""
+    out: Dict[str, Any] = {"start": start, "value": start, "pnl": 0.0, "ret": 0.0, "max_drop": 0.0,
+                           "taken": 0, "skipped": 0, "capped": 0, "open": 0, "contracts_per_bet": 0, "curve": []}
+    if g is None or g.empty:
+        return out
+    evs = []
+    for r in g.itertuples(index=False):
+        evs.append((float(r.entered_ts), 0, r))
+        if r.result in ("yes", "no", "unresolved") and pd.notna(r.settled_ts):
+            evs.append((float(r.settled_ts), 1, r))
+    evs.sort(key=lambda e: (e[0], -e[1]))          # same moment: settle first, freeing cash
+    cash, held, peak, max_drop, sizes = float(start), {}, float(start), 0.0, []
+    curve = []
+    for ts, kind, r in evs:
+        key = (r.arm, r.ticker)
+        if kind == 0:
+            per = r.price + fee_per_contract(r.price, 1)
+            n = int(share * start // per)
+            depth = r.depth if pd.notna(r.depth) else None
+            if depth is not None and n > depth:
+                n = int(depth)
+                out["capped"] += 1
+            while n > 0 and n * r.price + fee_per_contract(r.price, n) * n > cash:
+                n -= 1
+            if n <= 0:
+                out["skipped"] += 1
+                continue
+            cost = n * r.price + fee_per_contract(r.price, n) * n
+            cash -= cost
+            held[key] = (n, cost)
+            sizes.append(n)
+            out["taken"] += 1
+        elif key in held:
+            n, cost = held.pop(key)
+            if r.result == "unresolved":
+                cash += cost                           # never resolved: treat as money back
+            elif r.result == r.side:
+                cash += n * 1.0
+        value = cash + sum(c for _, c in held.values())
+        peak = max(peak, value)
+        max_drop = max(max_drop, peak - value)
+        curve.append((ts, value))
+    value = cash + sum(c for _, c in held.values())
+    out.update(value=value, pnl=value - start, ret=(value - start) / start, max_drop=max_drop,
+               open=len(held), contracts_per_bet=(sum(sizes) / len(sizes)) if sizes else 0, curve=curve)
+    return out
+
+
 def report(path: Optional[str] = None) -> Dict[str, Any]:
     if not os.path.exists(path or DB_PATH):
         return {"started": None}
@@ -449,4 +507,5 @@ def report(path: Optional[str] = None) -> Dict[str, Any]:
                                                                              "avg_price", "c_per_contract", "margin")}})
                 sp[lab] = pd.DataFrame(rows_)
         out["splits"][arm] = sp
+        out.setdefault("bankroll", {})[arm] = {b: simulate_bankroll(g, b) for b in BANKROLLS}
     return out
