@@ -239,3 +239,5 @@ data/gap_report.json
 data/whale_report.json
 data/*.json.tmp
 data/favorites.db
+data/poly_check.db
+data/poly_report.json

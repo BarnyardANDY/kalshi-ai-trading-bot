@@ -140,8 +140,8 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_fav, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Favorites test", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
+tab_perf, tab_maker, tab_fav, tab_poly, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
+    ["Performance", "Maker test", "Favorites test", "Polymarket check", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
      "Open positions", "Learning", "Predictions"])
 
 # ----------------------------------------------------------------------------
@@ -576,6 +576,60 @@ with tab_fav:
                                         "hours_left": st.column_config.NumberColumn("hours to close", format="%.1f"),
                                         "depth": st.column_config.NumberColumn("buyable at price", format="%.0f"),
                                         "c": st.column_config.NumberColumn("result (¢)", format="%+.1f")})
+
+# ----------------------------------------------------------------------------
+# Polymarket price check (separate study)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=120, max_entries=1)
+def _poly():
+    return D.poly_check()
+
+
+with tab_poly:
+    st.caption("Measurement only, no trading on either site, separate from every other test. Matches Kalshi "
+               "game-winner markets (NFL, NBA, NHL, MLB, college football) with the same game on Polymarket and "
+               "records both prices: every 5 seconds from an hour before a game until it ends. Asks: is Polymarket's "
+               "price a better guide, how fast does Kalshi follow when Polymarket moves, and would buying on KALSHI "
+               "when its price sits below Polymarket's have paid after fees? Runs as tmux session 'poly'; numbers "
+               "refresh every 10 minutes.")
+    pr = _poly()
+    if not pr:
+        st.info("No report yet. On the server: tmux session 'poly' running `python cli.py poly-check` "
+                "(first try `python cli.py poly-check --probe` to check the matching).")
+    else:
+        a, b, cc, d = st.columns(4)
+        a.metric("Games matched", f"{pr.get('games_matched', 0):,}")
+        b.metric("Games settled", f"{pr.get('games_settled', 0):,}")
+        cc.metric("Samples", f"{pr.get('samples', 0):,}")
+        d.metric("Hours recorded", f"{pr.get('hours', 0):.1f}")
+        disc = pr.get("discovery") or {}
+        if disc:
+            st.caption("Latest matching: " + " · ".join(
+                f"{lg.upper()} {s_.get('matched', 0)} of {s_.get('poly_games', 0)}" if "error" not in s_
+                else f"{lg.upper()} error" for lg, s_ in disc.items()))
+        st.markdown("#### 1. Which price predicts the winner better?")
+        st.caption("Lower Brier = more accurate. If Polymarket is clearly lower, it's a better 'fair price' than "
+                   "Kalshi's own, and the gaps below may be real.")
+        if pr.get("calibration"):
+            st.dataframe(pd.DataFrame(pr["calibration"]), hide_index=True, use_container_width=True,
+                         column_config={"Polymarket Brier": st.column_config.NumberColumn(format="%.4f"),
+                                        "Kalshi Brier": st.column_config.NumberColumn(format="%.4f")})
+        else:
+            st.info("Waiting for the first matched games to finish.")
+        st.markdown("#### 2. When Polymarket jumps 3c+, how fast does Kalshi follow?")
+        if pr.get("lag") and pr.get("jumps"):
+            st.dataframe(pd.DataFrame(pr["lag"]), hide_index=True, use_container_width=True,
+                         column_config={"share Kalshi has followed": st.column_config.NumberColumn(format="percent"),
+                                        "share Polymarket kept": st.column_config.NumberColumn(format="percent")})
+        st.markdown("#### 3. Buying on Kalshi when it's cheaper than Polymarket")
+        st.caption("For each gap: buy on Kalshi at the ask seen 0, 5, 15 or 30 seconds later, pay the fee, hold to "
+                   "the result. ± counts each game once. Positive at 5-15s late = something a home-built bot could catch.")
+        if pr.get("gaps"):
+            cfg_ = {c: st.column_config.NumberColumn(format="%+.2f") for c in
+                    ("0s late: c/contract", "5s late: c/contract", "15s late: c/contract", "30s late: c/contract")}
+            cfg_.update({c: st.column_config.NumberColumn(format="%.2f") for c in
+                         ("0s late: ± (c)", "5s late: ± (c)", "15s late: ± (c)", "30s late: ± (c)")})
+            st.dataframe(pd.DataFrame(pr["gaps"]), hide_index=True, use_container_width=True, column_config=cfg_)
 
 # ----------------------------------------------------------------------------
 # Speed gaps (15-minute crypto study)

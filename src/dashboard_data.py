@@ -209,6 +209,11 @@ def whale_study() -> Dict[str, Any]:
             "bankroll": rep.get("bankroll") or []}
 
 
+def poly_check() -> Optional[Dict[str, Any]]:
+    from src import poly_check as PC
+    return PC.read_report()
+
+
 def arb_scan() -> Dict[str, Any]:
     from src import arb_scan
     return arb_scan.report()

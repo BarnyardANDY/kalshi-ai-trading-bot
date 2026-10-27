@@ -1594,6 +1594,69 @@ def cmd_gap_study(args: argparse.Namespace) -> None:
         print("\nGap study stopped.")
 
 
+def cmd_poly_check(args: argparse.Namespace) -> None:
+    """Polymarket price-check study (measurement only, never trades). See src/poly_check.py."""
+    from src import poly_check as PC
+
+    if args.probe:
+        print("Checking both sites once (read-only)...")
+        out = asyncio.run(PC.probe())
+        for league, st in out.items():
+            if "error" in st:
+                print(f"  {league.upper()}: ERROR {st['error']}")
+                continue
+            print(f"  {league.upper()}: Polymarket games {st['poly_games']}, Kalshi games {st['kalshi_games']}, "
+                  f"matched {st['matched']} (no Kalshi match {st['no_kalshi_match']}, no winner market "
+                  f"{st['no_moneyline']}, sides unclear {st['ambiguous_sides']}), team names {st['team_names']}")
+            for ex in st.get("examples", []):
+                print(f"      e.g. {ex}")
+            if st.get("price_check"):
+                print(f"      Polymarket price now: {st['price_check']}")
+            if st.get("unmatched_poly") or st.get("unmatched_kalshi"):
+                print(f"      sample Polymarket: {st.get('unmatched_poly')}")
+                print(f"      sample Kalshi:     {st.get('unmatched_kalshi')}")
+        return
+    if args.report:
+        rep = PC.write_report()
+        print("=" * 70)
+        print("  POLYMARKET PRICE CHECK (no trading)")
+        print("=" * 70)
+        print(f"  {rep.get('samples', 0):,} samples, {rep.get('games_matched', 0)} games matched, "
+              f"{rep.get('games_settled', 0)} settled")
+        for r in rep.get("calibration", []):
+            print(f"    {r['when']:>16}: Polymarket {r['Polymarket Brier']:.4f} vs Kalshi {r['Kalshi Brier']:.4f}"
+                  f" ({r['samples']} samples)")
+        for r in rep.get("lag", []):
+            if r["share Kalshi has followed"] is not None:
+                print(f"    {r['seconds after the jump']:>2}s after a Polymarket jump: Kalshi followed "
+                      f"{r['share Kalshi has followed']:.0%}, Polymarket kept {r['share Polymarket kept']:.0%}")
+        for g in rep.get("gaps", []):
+            parts = [f"{g['gaps']:>32}: {g['count']} on {g['games']} games"]
+            for d in (0, 5, 15, 30):
+                v, m = g.get(f"{d}s late: c/contract"), g.get(f"{d}s late: ± (c)")
+                if v is not None:
+                    parts.append(f"{d}s {v:+.1f}c" + (f"±{m:.1f}" if m is not None else ""))
+            print("    " + " | ".join(parts))
+        print()
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("poly_check")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/poly_check.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    print("Polymarket price check running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(PC.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nPolymarket check stopped.")
+
+
 def cmd_favorites(args: argparse.Namespace) -> None:
     """Favorites paper test (measurement only, never trades). See src/favorites.py."""
     from src import favorites as F
@@ -2296,6 +2359,12 @@ def build_parser() -> argparse.ArgumentParser:
         "favorites", help="Paper test: buy 90-98c favorites 6-24h before close (never trades)")
     p_fav.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_fav.set_defaults(func=cmd_favorites)
+
+    p_pc = subparsers.add_parser(
+        "poly-check", help="Study: is Polymarket's price a better guide than Kalshi's for the same games? (never trades)")
+    p_pc.add_argument("--report", action="store_true", help="Print results so far and exit")
+    p_pc.add_argument("--probe", action="store_true", help="Check matching on both sites once and exit")
+    p_pc.set_defaults(func=cmd_poly_check)
 
     # --- arb-scan ---
     p_arb = subparsers.add_parser(
