@@ -1607,14 +1607,17 @@ def cmd_poly_check(args: argparse.Namespace) -> None:
                 continue
             print(f"  {league.upper()}: Polymarket games {st['poly_games']}, Kalshi games {st['kalshi_games']}, "
                   f"matched {st['matched']} (no Kalshi match {st['no_kalshi_match']}, no winner market "
-                  f"{st['no_moneyline']}, sides unclear {st['ambiguous_sides']}), team names {st['team_names']}")
+                  f"{st['no_moneyline']}, sides unclear {st['ambiguous_sides']}), team names {st.get('team_names')}")
+            print(f"      league search returned {st.get('tag_events', 0)} Polymarket events "
+                  f"(e.g. {st.get('tag_sample', [])[:2]}); found by game-page name: {st.get('by_name_lookup', 0)}")
             for ex in st.get("examples", []):
                 print(f"      e.g. {ex}")
             if st.get("price_check"):
                 print(f"      Polymarket price now: {st['price_check']}")
-            if st.get("unmatched_poly") or st.get("unmatched_kalshi"):
-                print(f"      sample Polymarket: {st.get('unmatched_poly')}")
-                print(f"      sample Kalshi:     {st.get('unmatched_kalshi')}")
+            if st.get("unmatched_poly"):
+                print(f"      unmatched Polymarket: {st['unmatched_poly']}")
+            if st.get("unmatched_kalshi"):
+                print(f"      unmatched Kalshi:     {st['unmatched_kalshi']}")
         return
     if args.report:
         rep = PC.write_report()

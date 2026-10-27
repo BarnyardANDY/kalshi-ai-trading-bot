@@ -152,15 +152,23 @@ class FakeResp:
 
 
 class FakeHttp:
+    def __init__(self, tag_events=True, slug_events=None):
+        self.tag_events, self.slug_events, self.slug_calls = tag_events, slug_events or {}, []
+
     async def get(self, url, params=None):
-        if url.endswith("/events") and params.get("tag_slug") == "nfl":
+        if isinstance(params, list):                         # look-up by game-page name
+            asked = [v for k, v in params if k == "slug"]
+            self.slug_calls.append(asked)
+            return FakeResp([self.slug_events[x] for x in asked if x in self.slug_events])
+        if url.endswith("/events") and params.get("tag_slug") == "nfl" and self.tag_events:
             return FakeResp([pev("nfl-buf-mia-2026-11-01", ["Bills", "Dolphins"], [0.61, 0.39])])
         if url.endswith("/teams") and params.get("league") == "nfl":
             return FakeResp([{"abbreviation": "BUF", "name": "Bills"}, {"abbreviation": "MIA", "name": "Dolphins"}])
         return FakeResp([])
 
     async def post(self, url, json=None):
-        return FakeResp({"t1": {"BUY": 0.62, "SELL": 0.60}, "t2": {"BUY": 0.40, "SELL": 0.38}})
+        # labelled the way the live feed does it: BUY below SELL
+        return FakeResp({"t1": {"BUY": 0.60, "SELL": 0.62}, "t2": {"BUY": 0.38, "SELL": 0.40}})
 
 
 def test_discover_sample_settle(tmp_path):
@@ -191,3 +199,47 @@ def test_tie_is_recorded_as_tie(tmp_path):
 def test_never_trades():
     src = open(P.__file__).read()
     assert "place_order" not in src and "create_order" not in src
+
+
+def test_one_kalshi_game_pairs_with_one_polymarket_game():
+    # the live probe paired Kalshi's single World Series game with BOTH of Polymarket's (today + tomorrow)
+    k = [kev("KXMLBGAME-26OCT272000MILTB", "MIL", "TB")]
+    p = [pev("mlb-mil-tb-2026-10-28", ["Brewers", "Rays"], [0.55, 0.45], tokens=("x", "y")),
+         pev("mlb-mil-tb-2026-10-27", ["Brewers", "Rays"], [0.55, 0.45])]
+    found, st = P.match_games(p, k, "mlb", {"mil": "Milwaukee Brewers", "tb": "Tampa Bay Rays"})
+    assert len(found) == 1 and found[0]["poly_slug"] == "mlb-mil-tb-2026-10-27"
+    assert st["unmatched_poly"] == ["mlb-mil-tb-2026-10-28"]
+
+
+def test_prices_take_lower_as_bid_whatever_the_labels():
+    class H:
+        async def post(self, url, json=None):
+            return FakeResp({"t": {"BUY": 0.17, "SELL": 0.18}})
+    assert asyncio.run(P.poly_prices(H(), ["t"])) == {"t": {"bid": 0.17, "ask": 0.18}}
+
+
+def test_lookup_by_game_page_name_when_tag_search_finds_nothing(tmp_path):
+    from datetime import datetime, timedelta
+    d = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    kd = (datetime.now() + timedelta(days=1)).strftime("%y%b%d").upper()
+    k = FakeKalshi()
+    ev = kev(f"KXNFLGAME-{kd}ARIDAL", "ARI", "DAL")
+
+    async def req(method, endpoint, params=None, require_auth=True):
+        if params and params.get("series_ticker") == "KXNFLGAME":
+            for m in ev["markets"]:
+                k.markets[m["ticker"]] = m
+            return {"events": [ev]}
+        return {"events": []}
+    k._make_authenticated_request = req
+    target = pev(f"nfl-ari-dal-{d}", ["Cardinals", "Cowboys"], [0.4, 0.6])
+    h = FakeHttp(tag_events=False, slug_events={f"nfl-ari-dal-{d}": target})
+    P._SLUG_MISS.clear()
+    found, st = asyncio.run(P.find_games(k, h, "nfl"))
+    assert st["matched"] == 1 and st["by_name_lookup"] == 1 and st["tag_events"] == 0
+    assert any(f"nfl-ari-dal-{d}" in c for c in h.slug_calls)
+    # misses aren't asked again for two hours
+    h2 = FakeHttp(tag_events=False)
+    asyncio.run(P.find_games(k, h2, "nfl"))
+    asyncio.run(P.find_games(k, h2, "nfl"))
+    assert len([c for c in h2.slug_calls if c]) <= len([c for c in h.slug_calls if c])

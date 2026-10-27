@@ -230,9 +230,11 @@ def pairs(path: Optional[str] = None, where: str = "", params=()) -> List[Dict[s
 # Network (public, read-only endpoints on both sites)
 # ----------------------------------------------------------------------------
 
-async def poly_events(http, league: str) -> List[Dict[str, Any]]:
+async def poly_events(http, league: str, seen_info: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     cfg = LEAGUES[league]
     seen, out = set(), []
+    raw = 0
+    sample: List[str] = []
     for tag in cfg["tags"]:
         for offset in range(0, 600, 200):
             try:
@@ -244,13 +246,63 @@ async def poly_events(http, league: str) -> List[Dict[str, Any]]:
                 break
             if not isinstance(page, list) or not page:
                 break
+            raw += len(page)
             for ev in page:
+                if len(sample) < 4 and ev.get("slug"):
+                    sample.append(ev["slug"])
                 info = parse_poly_slug(ev.get("slug") or "")
                 if info and info["prefix"] in cfg["prefixes"] and ev.get("slug") not in seen:
                     seen.add(ev["slug"])
                     out.append(ev)
             if len(page) < 200:
                 break
+    if seen_info is not None:
+        seen_info.update(tag_events=raw, tag_sample=sample)
+    return out
+
+
+_SLUG_MISS: Dict[str, float] = {}          # slugs looked up and not found: don't ask again for 2 hours
+
+
+async def poly_events_by_slug(http, league: str, kal_evs: List[Dict[str, Any]], have: set,
+                              now: Optional[float] = None, days_ahead: int = 3) -> List[Dict[str, Any]]:
+    """Look up Kalshi games directly by Polymarket's game-page name ('nfl-ari-dal-2026-11-01'),
+    for leagues whose tag search finds nothing. Only games in the next few days, both team orders,
+    the Kalshi date and the next day (a late game can carry the next day's date in UTC)."""
+    now = now or time.time()
+    today = datetime.fromtimestamp(now).date()
+    cands: List[str] = []
+    for ev in kal_evs:
+        kp = parse_kalshi_event(ev)
+        if not kp:
+            continue
+        d0 = datetime.strptime(kp["date"], "%Y-%m-%d").date()
+        if not 0 <= (d0 - today).days <= days_ahead:
+            continue
+        raw = [((m.get("ticker") or "").rsplit("-", 1)[-1]).lower() for m in kp["teams"].values()]
+        codes = [sorted({c, norm(c)}) for c in raw]
+        for d in (d0, d0.fromordinal(d0.toordinal() + 1)):
+            for prefix in LEAGUES[league]["prefixes"]:
+                for a in codes[0]:
+                    for b in codes[1]:
+                        for x, y in ((a, b), (b, a)):
+                            slug = f"{prefix}-{x}-{y}-{d.isoformat()}"
+                            if slug not in have and now - _SLUG_MISS.get(slug, 0) > 7200:
+                                cands.append(slug)
+    out = []
+    for i in range(0, len(cands), 20):
+        chunk = cands[i:i + 20]
+        try:
+            r = await http.get(f"{GAMMA}/events", params=[("slug", x) for x in chunk])
+            r.raise_for_status()
+            page = r.json()
+        except Exception:
+            continue
+        found = {ev.get("slug") for ev in page if isinstance(ev, dict)} if isinstance(page, list) else set()
+        for x in chunk:
+            if x not in found:
+                _SLUG_MISS[x] = now
+        out.extend(ev for ev in (page if isinstance(page, list) else []) if ev.get("slug") in set(chunk))
     return out
 
 
@@ -299,47 +351,56 @@ async def poly_prices(http, tokens: List[str]) -> Dict[str, Dict[str, float]]:
         for t in chunk:
             d = data.get(t) or {}
             try:
-                out[t] = {"ask": float(d.get("BUY")) if d.get("BUY") is not None else None,
-                          "bid": float(d.get("SELL")) if d.get("SELL") is not None else None}
+                vals = [float(d[k]) for k in ("BUY", "SELL") if d.get(k) is not None]
             except (TypeError, ValueError):
                 continue
+            # The live feed labels the two sides the opposite way from its docs (BUY came back below SELL),
+            # so don't trust the labels: the lower price is the best bid, the higher the best ask.
+            if len(vals) == 2:
+                out[t] = {"bid": min(vals), "ask": max(vals)}
     return out
 
 
 def match_games(poly_evs: List[Dict[str, Any]], kal_evs: List[Dict[str, Any]], league: str,
-                team_names: Dict[str, str]) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Pairs of (Polymarket game, Kalshi game) and counts of why others didn't pair."""
-    stats = {"poly_games": 0, "kalshi_games": 0, "matched": 0, "no_kalshi_match": 0, "no_moneyline": 0,
-             "ambiguous_sides": 0}
+                team_names: Dict[str, str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Pairs of (Polymarket game, Kalshi game), one-to-one, and counts of why others didn't pair."""
+    stats: Dict[str, Any] = {"poly_games": 0, "kalshi_games": 0, "matched": 0, "no_kalshi_match": 0,
+                             "no_moneyline": 0, "ambiguous_sides": 0}
     kparsed = [(ev, parse_kalshi_event(ev)) for ev in kal_evs]
     kparsed = [(ev, p) for ev, p in kparsed if p]
     stats["kalshi_games"] = len(kparsed)
-    out = []
+    polys = []
     for pev in poly_evs:
         info = parse_poly_slug(pev.get("slug") or "")
-        if not info:
+        if info:
+            polys.append((pev, info))
+    stats["poly_games"] = len(polys)
+    # every (Polymarket, Kalshi) pair with both teams the same and dates a day apart at most;
+    # the same date first, and each game used once (a series plays the same teams on consecutive days)
+    cand = []
+    for pi, (pev, info) in enumerate(polys):
+        for ki, (kev, kp) in enumerate(kparsed):
+            if info["teams"] == set(kp["teams"]) and dates_close(info["date"], kp["date"]):
+                cand.append((0 if info["date"] == kp["date"] else 1, pi, ki))
+    cand.sort()
+    used_p, used_k, out = set(), set(), []
+    for _, pi, ki in cand:
+        if pi in used_p or ki in used_k:
             continue
-        stats["poly_games"] += 1
-        best, best_score = None, (0, 0)
-        for kev, kp in kparsed:
-            if not dates_close(info["date"], kp["date"]):
-                continue
-            # both teams must match; the same date beats the next day (back-to-back series games)
-            score = (len(info["teams"] & set(kp["teams"])), int(info["date"] == kp["date"]))
-            if score > best_score:
-                best, best_score = (kev, kp), score
-        if not best or best_score[0] < 2:
-            stats["no_kalshi_match"] += 1
-            continue
+        pev, _info = polys[pi]
+        kev, kp = kparsed[ki]
         ml = moneyline(pev)
         if not ml:
             stats["no_moneyline"] += 1
+            used_p.add(pi)
             continue
-        kev, kp = best
         sides, how = assign_outcomes(kp["teams"], ml, team_names)
         if not sides:
             stats["ambiguous_sides"] += 1
+            used_p.add(pi)
             continue
+        used_p.add(pi)
+        used_k.add(ki)
         a, b = sorted(kp["teams"])
         out.append({"pair_id": f"{kev['event_ticker']}|{pev['slug']}", "league": league, "poly_slug": pev["slug"],
                     "kalshi_event": kev["event_ticker"], "team_a": a, "team_b": b,
@@ -347,7 +408,28 @@ def match_games(poly_evs: List[Dict[str, Any]], kal_evs: List[Dict[str, Any]], l
                     "poly_token_a": ml["tokens"][sides[a]], "poly_token_b": ml["tokens"][sides[b]],
                     "start_ts": ml["start"], "matched_how": how})
         stats["matched"] += 1
+    in_cand = {pi for _, pi, _ in cand}
+    stats["no_kalshi_match"] = sum(1 for i in range(len(polys)) if i not in in_cand)
+    stats["unmatched_poly"] = [polys[i][0].get("slug") for i in range(len(polys)) if i not in used_p][:4]
+    stats["unmatched_kalshi"] = [kparsed[i][0].get("event_ticker") for i in range(len(kparsed)) if i not in used_k][:4]
     return out, stats
+
+
+async def find_games(client, http, league: str) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Tag search, then a direct look-up by game-page name for Kalshi games still unmatched."""
+    cfg = LEAGUES[league]
+    seen: Dict[str, Any] = {}
+    pev = await poly_events(http, league, seen)
+    kev = await kalshi_events(client, cfg["kalshi"])
+    names = await poly_team_names(http, league)
+    found, stats = match_games(pev, kev, league, names)
+    done = {p["kalshi_event"] for p in found}
+    have = {e.get("slug") for e in pev}
+    extra = await poly_events_by_slug(http, league, [e for e in kev if e.get("event_ticker") not in done], have)
+    if extra:
+        found, stats = match_games(pev + extra, kev, league, names)
+    stats.update(seen, by_name_lookup=len(extra), team_names=len(names))
+    return found, stats
 
 
 async def discover(client, http, path: Optional[str] = None, logger=None) -> Dict[str, Any]:
@@ -355,13 +437,11 @@ async def discover(client, http, path: Optional[str] = None, logger=None) -> Dic
     now = time.time()
     for league, cfg in LEAGUES.items():
         try:
-            pev = await poly_events(http, league)
-            kev = await kalshi_events(client, cfg["kalshi"])
-            names = await poly_team_names(http, league)
-            found, stats = match_games(pev, kev, league, names)
+            found, stats = await find_games(client, http, league)
         except Exception as e:
             info[league] = {"error": repr(e)[:200]}
             continue
+        stats = {k: v for k, v in stats.items() if not isinstance(v, list)}
         with closing(_conn(path)) as c:
             for p in found:
                 c.execute("""INSERT OR IGNORE INTO pairs (pair_id, league, poly_slug, kalshi_event, team_a, team_b,
@@ -479,15 +559,9 @@ async def probe(logger=None) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=10.0, headers={"User-Agent": "kalshi-poly-check"}) as http:
             for league, cfg in LEAGUES.items():
                 try:
-                    pev = await poly_events(http, league)
-                    kev = await kalshi_events(client, cfg["kalshi"])
-                    names = await poly_team_names(http, league)
-                    found, stats = match_games(pev, kev, league, names)
-                    stats["team_names"] = len(names)
+                    found, stats = await find_games(client, http, league)
                     stats["examples"] = [f"{p['kalshi_event']} <-> {p['poly_slug']} ({p['matched_how']})"
                                          for p in found[:2]]
-                    stats["unmatched_poly"] = [e.get("slug") for e in pev[:3]] if not found else []
-                    stats["unmatched_kalshi"] = [e.get("event_ticker") for e in kev[:3]] if not found else []
                     if found:
                         p = found[0]
                         pr = await poly_prices(http, [p["poly_token_a"]])
