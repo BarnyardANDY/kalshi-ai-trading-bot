@@ -710,6 +710,37 @@ def poly_jumps(ss: List[Dict[str, Any]], min_jump: float = 0.03, waits=(0, 5, 15
     return out
 
 
+def preview(path: Optional[str] = None) -> Dict[str, Any]:
+    """What the prices recorded so far look like, before any game has finished: how far apart the two
+    sites usually are, and how often Kalshi's ask sits below Polymarket's middle by more than the fee."""
+    diffs: List[float] = []
+    gaps2 = gaps5 = n = 0
+    games, live_games = set(), set()
+    with closing(_conn(path)) as c:
+        c.row_factory = sqlite3.Row
+        for s in c.execute("SELECT * FROM samples"):
+            s = dict(s)
+            km, pm = _mid(s["ka_bid"], s["ka_ask"]), _mid(s["pa_bid"], s["pa_ask"])
+            if km is None or pm is None:
+                continue
+            n += 1
+            games.add(s["pair_id"])
+            if s["live"]:
+                live_games.add(s["pair_id"])
+            diffs.append(abs(km - pm) * 100)
+            best = 0.0
+            for v in side_views(s):
+                if v["p_mid"] is not None and v["k_ask"] and 0 < v["k_ask"] < 1:
+                    best = max(best, v["p_mid"] - v["k_ask"] - taker_fee(v["k_ask"]))
+            gaps2 += best >= 0.02
+            gaps5 += best >= 0.05
+    if not n:
+        return {"samples_with_both_prices": 0}
+    return {"samples_with_both_prices": n, "games_sampled": len(games), "games_sampled_live": len(live_games),
+            "median_diff_c": statistics.median(diffs), "share_diff_over_3c": sum(d > 3 for d in diffs) / n,
+            "share_gap_2c": gaps2 / n, "share_gap_5c": gaps5 / n}
+
+
 def report(path: Optional[str] = None, thresholds=(0.02, 0.05), delays=(0, 5, 15, 30),
            waits=(0, 5, 15, 30, 60)) -> Dict[str, Any]:
     if not os.path.exists(path or DB_PATH):
@@ -776,7 +807,7 @@ def report(path: Optional[str] = None, thresholds=(0.02, 0.05), delays=(0, 5, 15
     return {"samples": n_samples, "hours": hours, "games_matched": len(allp), "games_settled": len(settled),
             "by_league": {lg: sum(1 for p in allp if p["league"] == lg) for lg in LEAGUES},
             "discovery": json.loads(disc[0]) if disc else {}, "calibration": calibration, "gaps": gaps,
-            "lag": lag, "jumps": len(jumps), "computed_ts": time.time(),
+            "lag": lag, "jumps": len(jumps), "computed_ts": time.time(), "preview": preview(path),
             "summary_line": f"{n_samples:,} samples, {len(allp)} games matched, {len(settled)} settled"
                             + (f"; best at 5s late: {best[1]} {best[2]:+.2f}c ±{best[3]:.2f}" if best else "")}
 

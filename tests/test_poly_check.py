@@ -267,3 +267,18 @@ def test_nhl_codes_that_differ_between_sites_still_match():
 def test_aliases_stay_in_their_league():
     assert P.lnorm("nhl", "lak") == "la" and P.lnorm("nba", "lak") == "lak"
     assert "mon" in P.code_variants("nhl", "MTL") and "lak" in P.code_variants("nhl", "LA")
+
+
+def test_preview_before_any_game_finishes(tmp_path):
+    db = str(tmp_path / "p.db")
+    with P.closing(P._conn(db)) as c:
+        rows = [_s(0, (0.49, 0.50), (0.49, 0.51), live=0), _s(60, (0.49, 0.50), (0.59, 0.61), live=1),
+                _s(120, (0.58, 0.59), (0.59, 0.61), live=1)]
+        c.executemany("INSERT INTO samples VALUES (:ts,:pair_id,:live,:ka_bid,:ka_ask,:kb_bid,:kb_ask,:pa_bid,:pa_ask,"
+                      ":pb_bid,:pb_ask)", rows)
+        c.commit()
+    pv = P.preview(db)
+    assert pv["samples_with_both_prices"] == 3 and pv["games_sampled"] == 1 and pv["games_sampled_live"] == 1
+    assert pv["share_gap_5c"] == pytest.approx(1 / 3)          # the moment Polymarket jumped to 0.60
+    assert pv["median_diff_c"] == pytest.approx(1.5)            # differences 0.5c, 10.5c, 1.5c
+    assert P.report(db)["preview"]["games_sampled"] == 1

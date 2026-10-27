@@ -620,6 +620,20 @@ with tab_poly:
             st.caption("Latest matching: " + " · ".join(
                 f"{lg.upper()} {s_.get('matched', 0)} of {s_.get('poly_games', 0)}" if "error" not in s_
                 else f"{lg.upper()} error" for lg, s_ in disc.items()))
+        pv = pr.get("preview") or {}
+        if pv.get("samples_with_both_prices"):
+            st.markdown("#### So far (before any game has finished)")
+            st.caption("From every moment both sites had a price. Results (sections 1-3) need finished games: each "
+                       "is scored about 2 hours after it starts, once Kalshi posts the result.")
+            a, b, cc, d = st.columns(4)
+            a.metric("Games with prices", f"{pv['games_sampled']:,}", f"{pv['games_sampled_live']} recorded live",
+                     delta_color="off")
+            b.metric("Typical difference", f"{pv['median_diff_c']:.1f}¢", "Kalshi vs Polymarket middle price",
+                     delta_color="off")
+            cc.metric("Kalshi 2¢+ cheaper", f"{pv['share_gap_2c']:.1%}", "of moments, after Kalshi's fee",
+                      delta_color="off")
+            d.metric("Kalshi 5¢+ cheaper", f"{pv['share_gap_5c']:.1%}", "of moments, after Kalshi's fee",
+                     delta_color="off")
         st.markdown("#### 1. Which price predicts the winner better?")
         st.caption("Lower Brier = more accurate. If Polymarket is clearly lower, it's a better 'fair price' than "
                    "Kalshi's own, and the gaps below may be real.")
