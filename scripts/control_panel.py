@@ -140,9 +140,18 @@ ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
-tab_perf, tab_maker, tab_fav, tab_poly, tab_gap, tab_whale, tab_arb, tab_ctrl, tab_pos, tab_learn, tab_pred = st.tabs(
-    ["Performance", "Maker test", "Favorites test", "Polymarket check", "Speed gaps", "Whale follow", "Price inconsistencies", "Strategy controls",
-     "Open positions", "Learning", "Predictions"])
+# Live tests first; finished ones live in the Archive tab (their numbers stay, frozen).
+tab_fav, tab_poly, tab_maker, tab_whale, tab_ctrl, tab_arch = st.tabs(
+    ["Favorites test", "Polymarket check", "Maker test", "Whale follow", "Strategy controls", "Archive"])
+with tab_arch:
+    st.caption("Finished tests, kept for the record. None of these found an edge; their processes are stopped "
+               "and their numbers are frozen at the end.")
+    tab_perf = st.expander("Original AI bot: performance (no edge vs. the market; bot off)")
+    tab_pos = st.expander("Original AI bot: open positions")
+    tab_learn = st.expander("Original AI bot: learning")
+    tab_pred = st.expander("Original AI bot: predictions")
+    tab_gap = st.expander("Speed gaps, crypto 15-minute markets (stopped Oct 24: nothing a 1-3 s bot can catch)")
+    tab_arb = st.expander("Price inconsistencies (stopped Oct 24: tiny edges, almost nothing buyable)")
 
 # ----------------------------------------------------------------------------
 # Performance
@@ -483,13 +492,17 @@ with tab_fav:
     if not fr.get("started"):
         st.info("Not started yet. On the server: tmux session 'fav' running `python cli.py favorites`.")
     else:
-        st.markdown(f"**Day {fr['days']:.1f} of {F.VERDICT['min_days']}** · about "
+        st.markdown(f"**Day {fr['days']:.1f} of {F.VERDICT['min_days']}** (original two arms) · about "
                     f"{fr['qualifying_per_scan']:.0f} markets qualify per scan. Verdict rule (fixed in advance): "
                     f"after {F.VERDICT['min_days']} days and {F.VERDICT['min_events']} separate settled events, an arm "
                     "passes only if its ¢/contract is above zero by more than its ± margin.")
         for arm, label in F.ARMS.items():
             sa = fr["arms"][arm]
             st.markdown(f"#### {label}")
+            if arm in F.NEW_ARMS and (fr.get("arm_started") or {}).get(arm):
+                st.caption(f"Added {datetime.fromtimestamp(fr['arm_started'][arm]).strftime('%b %d')} from the "
+                           f"one-week check-in; judged only on bets from that day on (day "
+                           f"{fr['arm_days'][arm]:.1f} of {F.VERDICT['min_days']}).")
             a, b, cc, d, e = st.columns(5)
             a.metric("Paper bets", f"{sa['bets']:,}", f"{sa['settled']:,} settled", delta_color="off")
             b.metric("Separate events", f"{sa['events']:,}", f"of {F.VERDICT['min_events']} needed", delta_color="off")
@@ -513,10 +526,10 @@ with tab_fav:
         if not done.empty:
             st.markdown("#### Equity (per contract, settled bets)")
             fig = go.Figure()
-            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71")):
+            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db")):
                 g = done[done["arm"] == arm]
                 if not g.empty:
-                    fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=arm,
+                    fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=F.ARMS[arm],
                                              line=dict(width=2, color=color)))
             st.plotly_chart(chart_layout(fig, 260).update_layout(showlegend=True), use_container_width=True)
 
@@ -546,7 +559,7 @@ with tab_fav:
                 pick_b = st.radio("Show value over time for", list(F.BANKROLLS), horizontal=True,
                                   format_func=lambda b: f"${b:,}", key="fav_bankroll")
                 fig = go.Figure()
-                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71")):
+                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db")):
                     cv = (bk.get(arm) or {}).get(pick_b, {}).get("curve") or []
                     if cv:
                         xs = pd.to_datetime([t for t, _ in cv], unit="s", utc=True).tz_convert("America/New_York").tz_localize(None)

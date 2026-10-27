@@ -66,14 +66,18 @@ def test_scan_records_once_then_settles(tmp_path):
     ms = [mk("E1-A", .94, .95), mk("E2-B", .04, .06), mk("E3-C", .60, .62), mk("E4-D", .94, .95, hours=2)]
     c = Fake(ms)
     r = asyncio.run(F.scan_favorites(c, NOW, db))
-    assert r == {"markets": 4, "qualifying": 2, "new": 2}
+    assert (r["markets"], r["qualifying"], r["new"]) == (4, 2, 2)
+    # E1-A (95c, 12h) also fits the 93-95c arm; E4-D (95c, 2h) fits only the 1-6h arm
+    assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1}
     assert asyncio.run(F.scan_favorites(c, NOW + 600, db))["new"] == 0          # one bet per market
     df = F.rows(db)
+    df = df[df["arm"] == "favorites"]
     assert set(df["side"]) == {"yes", "no"} and df.loc[df["side"] == "yes", "depth"].iloc[0] == 120
     c.markets["E1-A"]["result"] = "yes"                                          # favorite wins
     c.markets["E2-B"]["result"] = "yes"                                          # favorite (NO) loses
-    assert asyncio.run(F.settle(c, NOW + 90000, db)) == 2
-    df = F.rows(db).set_index("ticker")
+    assert asyncio.run(F.settle(c, NOW + 90000, db)) == 3                        # E1-A in two arms + E2-B
+    df = F.rows(db)
+    df = df[df["arm"] == "favorites"].set_index("ticker")
     assert df.loc["E1-A", "pnl"] == pytest.approx(F.pnl_per_contract(0.95, True))
     assert df.loc["E2-B", "pnl"] == pytest.approx(F.pnl_per_contract(0.96, False))
 
@@ -165,3 +169,29 @@ def test_report_includes_bankrolls(tmp_path):
     asyncio.run(F.scan_favorites(c, NOW, db))
     rep = F.report(db)
     assert set(rep["bankroll"]["favorites"]) == set(F.BANKROLLS)
+
+
+def test_new_arms_have_their_own_rules():
+    m93 = mk("A-1", 0.93, 0.94)
+    assert F.favorite(m93, F.ARM_RULES["fav_93_95"]) is not None
+    assert F.favorite(mk("A-2", 0.96, 0.97), F.ARM_RULES["fav_93_95"]) is None         # 97c: outside 93-95c
+    assert F.favorite(mk("A-3", 0.90, 0.91), F.ARM_RULES["fav_93_95"]) is None
+    assert F.in_window(mk("A-4", .94, .95, hours=3), NOW, F.ARM_RULES["fav_1_6h"])
+    assert not F.in_window(mk("A-4", .94, .95, hours=3), NOW, F.ARM_RULES["favorites"])
+    assert not F.in_window(mk("A-5", .94, .95, hours=8), NOW, F.ARM_RULES["fav_1_6h"])
+
+
+def test_new_arms_start_their_own_clock(tmp_path):
+    db = str(tmp_path / "f.db")
+    with F.closing(F._conn(db)) as con:                        # the original test began 8 days earlier
+        con.execute("INSERT INTO meta VALUES ('started', ?)", (str(NOW - 8 * 86400),))
+        con.commit()
+    F._mark_started(db, NOW)                                    # new code starts: originals keep their date
+    assert F.started_ts(db) == pytest.approx(NOW - 8 * 86400)
+    assert F.started_ts(db, "fav_93_95") == pytest.approx(NOW)
+    c = Fake([mk("E1-X", .94, .95)])
+    asyncio.run(F.scan_favorites(c, NOW, db))
+    rep = F.report(db)
+    assert rep["arm_days"]["favorites"] == pytest.approx(8, abs=0.1)
+    assert rep["arm_days"]["fav_93_95"] < 0.1
+    assert "day 0 of 14" in rep["arms"]["fav_93_95"]["verdict"] or rep["arms"]["fav_93_95"]["verdict"] == "waiting for results"

@@ -51,7 +51,17 @@ RULES = {
 VERDICT = {"min_days": 14, "min_events": 300}
 SCAN_SECONDS = 600
 EXCLUDE_PREFIXES = ("KXMVE",)
-ARMS = {"favorites": "All favorites (90-98c, 6-24h)", "whale": "Only after a whale bought the favorite"}
+ARMS = {"favorites": "All favorites (90-98c, 6-24h)", "whale": "Only after a whale bought the favorite",
+        "fav_93_95": "93-95c favorites only (6-24h)", "fav_1_6h": "Favorites 1-6h before close (90-98c)"}
+# each scanned arm's own rules (the whale arm uses the 'favorites' rules plus its whale trigger)
+ARM_RULES = {
+    "favorites": {"min_price": RULES["min_price"], "max_price": RULES["max_price"],
+                  "min_hours": RULES["min_hours"], "max_hours": RULES["max_hours"]},
+    # added Oct 27 from the one-week check-in, each judged ONLY on bets from its own start date:
+    "fav_93_95": {"min_price": 0.93, "max_price": 0.955, "min_hours": 6.0, "max_hours": 24.0},
+    "fav_1_6h": {"min_price": 0.90, "max_price": 0.98, "min_hours": 1.0, "max_hours": 6.0},
+}
+NEW_ARMS = ("fav_93_95", "fav_1_6h")
 
 
 # ----------------------------------------------------------------------------
@@ -84,13 +94,14 @@ def _f(m: Dict[str, Any], dollars: str, cents: str) -> float:
         return 0.0
 
 
-def favorite(m: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def favorite(m: Dict[str, Any], rules: Optional[Dict[str, float]] = None) -> Optional[Dict[str, Any]]:
     """The side that is the favorite and buyable within the rules, or None."""
+    r = rules or ARM_RULES["favorites"]
     best = None
     for side in ("yes", "no"):
         ask = _f(m, f"{side}_ask_dollars", f"{side}_ask")
         bid = _f(m, f"{side}_bid_dollars", f"{side}_bid")
-        if not (RULES["min_price"] <= ask <= RULES["max_price"]) or bid <= 0:
+        if not (r["min_price"] <= ask <= r["max_price"]) or bid <= 0:
             continue
         spread = round(ask - bid, 4)
         if spread > RULES["max_spread"]:
@@ -106,9 +117,10 @@ def hours_left(m: Dict[str, Any], now: float) -> Optional[float]:
     return (c - now) / 3600 if c else None
 
 
-def in_window(m: Dict[str, Any], now: float) -> bool:
+def in_window(m: Dict[str, Any], now: float, rules: Optional[Dict[str, float]] = None) -> bool:
+    r = rules or ARM_RULES["favorites"]
     h = hours_left(m, now)
-    return h is not None and RULES["min_hours"] <= h <= RULES["max_hours"]
+    return h is not None and r["min_hours"] <= h <= r["max_hours"]
 
 
 # ----------------------------------------------------------------------------
@@ -132,15 +144,22 @@ def _conn(path: Optional[str] = None) -> sqlite3.Connection:
     return c
 
 
-def started_ts(path: Optional[str] = None) -> Optional[float]:
+def _start_key(arm: Optional[str]) -> str:
+    return f"started_{arm}" if arm in NEW_ARMS else "started"
+
+
+def started_ts(path: Optional[str] = None, arm: Optional[str] = None) -> Optional[float]:
+    """When the test (or one of the arms added later) started counting bets."""
     with closing(_conn(path)) as c:
-        r = c.execute("SELECT v FROM meta WHERE k='started'").fetchone()
+        r = c.execute("SELECT v FROM meta WHERE k=?", (_start_key(arm),)).fetchone()
     return float(r[0]) if r else None
 
 
 def _mark_started(path: Optional[str], now: float) -> None:
     with closing(_conn(path)) as c:
         c.execute("INSERT OR IGNORE INTO meta VALUES ('started', ?)", (str(now),))
+        for arm in NEW_ARMS:
+            c.execute("INSERT OR IGNORE INTO meta VALUES (?, ?)", (_start_key(arm), str(now)))
         c.commit()
 
 
@@ -189,8 +208,9 @@ async def fetch_window(client, now: float, max_pages: int = 30) -> List[Dict[str
     from src.maker import slim
     out, cursor = [], None
     for _ in range(max_pages):
-        params = {"limit": 1000, "status": "open", "min_close_ts": int(now + RULES["min_hours"] * 3600),
-                  "max_close_ts": int(now + RULES["max_hours"] * 3600)}
+        params = {"limit": 1000, "status": "open",
+                  "min_close_ts": int(now + min(r["min_hours"] for r in ARM_RULES.values()) * 3600),
+                  "max_close_ts": int(now + max(r["max_hours"] for r in ARM_RULES.values()) * 3600)}
         if cursor:
             params["cursor"] = cursor
         resp = await client._make_authenticated_request("GET", "/trade-api/v2/markets", params=params,
@@ -213,33 +233,41 @@ async def _depth(client, ticker: str, side: str, price: float) -> Optional[float
 
 
 async def scan_favorites(client, now: float, path: Optional[str] = None, logger=None,
-                         markets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, int]:
+                         markets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     markets = markets if markets is not None else await fetch_window(client, now)
-    known = _known(path, "favorites")
+    known = {arm: _known(path, arm) for arm in ARM_RULES}
     qualifying = new = 0
+    new_by_arm = {arm: 0 for arm in ARM_RULES}
+    depth_cache: Dict[tuple, Optional[float]] = {}
     book_calls = 0          # order-book lookups are capped per scan so a big first scan can't stall the whale arm
     for m in markets:
-        if not in_window(m, now):
-            continue
-        fav = favorite(m)
-        if not fav:
-            continue
-        qualifying += 1
-        if m["ticker"] in known:
-            continue
-        depth = None
-        if book_calls < 300:
-            book_calls += 1
-            depth = await _depth(client, m["ticker"], fav["side"], fav["price"])
-        if record(path, "favorites", m, fav, now, depth):
-            new += 1
+        for arm, rules in ARM_RULES.items():
+            if not in_window(m, now, rules):
+                continue
+            fav = favorite(m, rules)
+            if not fav:
+                continue
+            if arm == "favorites":
+                qualifying += 1
+            if m["ticker"] in known[arm]:
+                continue
+            key = (m["ticker"], fav["side"], fav["price"])
+            if key not in depth_cache:
+                depth_cache[key] = None
+                if book_calls < 300:
+                    book_calls += 1
+                    depth_cache[key] = await _depth(client, m["ticker"], fav["side"], fav["price"])
+            if record(path, arm, m, fav, now, depth_cache[key]):
+                new_by_arm[arm] += 1
+                if arm == "favorites":
+                    new += 1
     with closing(_conn(path)) as c:
         c.execute("INSERT OR REPLACE INTO scans VALUES (?,?,?)", (now, len(markets), qualifying))
         c.commit()
     if logger:
-        logger.info(f"FAV scan: {len(markets)} markets closing in 6-24h, {qualifying} with a 90-98c favorite, "
-                    f"{new} new paper buys")
-    return {"markets": len(markets), "qualifying": qualifying, "new": new}
+        logger.info(f"FAV scan: {len(markets)} markets closing in 1-24h, {qualifying} with a 90-98c favorite 6-24h out; "
+                    "new paper buys: " + ", ".join(f"{a} {n}" for a, n in new_by_arm.items()))
+    return {"markets": len(markets), "qualifying": qualifying, "new": new, "new_by_arm": new_by_arm}
 
 
 async def whale_entries(client, pending: List[Dict[str, Any]], now: float, path: Optional[str] = None,
@@ -491,10 +519,14 @@ def report(path: Optional[str] = None) -> Dict[str, Any]:
         sc = c.execute("SELECT COUNT(*), AVG(markets), AVG(qualifying) FROM scans").fetchone()
     out: Dict[str, Any] = {"started": start, "days": days, "scans": sc[0], "markets_per_scan": sc[1] or 0,
                            "qualifying_per_scan": sc[2] or 0, "arms": {}, "splits": {}, "df": df}
+    out["arm_started"], out["arm_days"] = {}, {}
     for arm in ARMS:
         g = df[df["arm"] == arm] if not df.empty else df
+        a_start = started_ts(path, arm) if arm in NEW_ARMS else start
+        a_days = (time.time() - a_start) / 86400 if a_start else 0.0
+        out["arm_started"][arm], out["arm_days"][arm] = a_start, a_days
         st = _stats(g) if not g.empty else {"bets": 0, "settled": 0, "events": 0}
-        st["verdict"] = verdict(st, days)
+        st["verdict"] = verdict(st, a_days)
         out["arms"][arm] = st
         sp = {}
         if not g.empty:
