@@ -1635,7 +1635,7 @@ def cmd_poly_check(args: argparse.Namespace) -> None:
                       f"{r['share Kalshi has followed']:.0%}, Polymarket kept {r['share Polymarket kept']:.0%}")
         for g in rep.get("gaps", []):
             parts = [f"{g['gaps']:>32}: {g['count']} on {g['games']} games"]
-            for d in (0, 5, 15, 30):
+            for d in (0, 2, 5, 10, 15, 30):
                 v, m = g.get(f"{d}s late: c/contract"), g.get(f"{d}s late: ± (c)")
                 if v is not None:
                     parts.append(f"{d}s {v:+.1f}c" + (f"±{m:.1f}" if m is not None else ""))

@@ -48,6 +48,8 @@ LEAGUES: Dict[str, Dict[str, Any]] = {
 # team codes that differ between the two sites (both sides normalised through this)
 ALIASES = {"jac": "jax", "wsh": "was", "lvr": "lv", "gs": "gsw", "sa": "sas", "no": "nop", "phx": "pho",
            "bkn": "bk", "cws": "chw", "az": "ari"}
+LIVE_EVERY = 2.0           # seconds between samples while a game is on (a home-built bot reacts in 1-3 s)
+PRE_EVERY = 5.0            # ...in the hour before it starts
 HOT_BEFORE = 3600          # sample every 5 s from an hour before the start...
 HOT_AFTER = 5 * 3600       # ...until 5 hours after it
 DAY_WINDOW = 24 * 3600     # every minute for games starting within a day
@@ -498,8 +500,10 @@ async def sample(client, http, pl: List[Dict[str, Any]], now: float, path: Optio
     from src.whale import _markets
     if not pl:
         return 0
-    ks = await _markets(client, sorted({t for p in pl for t in (p["k_ticker_a"], p["k_ticker_b"])}))
-    ps = await poly_prices(http, sorted({t for p in pl for t in (p["poly_token_a"], p["poly_token_b"])}))
+    # both sites read at the same moment (one after the other gave Polymarket's price a slight head start)
+    ks, ps = await asyncio.gather(
+        _markets(client, sorted({t for p in pl for t in (p["k_ticker_a"], p["k_ticker_b"])})),
+        poly_prices(http, sorted({t for p in pl for t in (p["poly_token_a"], p["poly_token_b"])})))
     rows = []
     for p in pl:
         ka, kb = ks.get(p["k_ticker_a"]), ks.get(p["k_ticker_b"])
@@ -545,7 +549,7 @@ async def run_forever(logger=None, path: Optional[str] = None) -> None:
     from src import report_runner
 
     client = KalshiClient()
-    last_disc = last_slow = last_settle = last_report = 0.0
+    last_disc = last_slow = last_pre = last_settle = last_report = 0.0
     report_task = None
     try:
         async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": "kalshi-poly-check"}) as http:
@@ -556,9 +560,12 @@ async def run_forever(logger=None, path: Optional[str] = None) -> None:
                         last_disc = t0
                         await discover(client, http, path, logger)
                     open_pairs = pairs(path, "WHERE result_a IS NULL")
-                    hot = [p for p in open_pairs if p["start_ts"] and
-                           p["start_ts"] - HOT_BEFORE <= t0 <= p["start_ts"] + HOT_AFTER]
-                    await sample(client, http, hot, time.time(), path)
+                    live = [p for p in open_pairs if p["start_ts"] and p["start_ts"] <= t0 <= p["start_ts"] + HOT_AFTER]
+                    await sample(client, http, live, time.time(), path)            # every 2 s during games
+                    if t0 - last_pre >= PRE_EVERY - 0.2:
+                        last_pre = t0
+                        pre = [p for p in open_pairs if p["start_ts"] and p["start_ts"] - HOT_BEFORE <= t0 < p["start_ts"]]
+                        await sample(client, http, pre, time.time(), path)
                     if t0 - last_slow > 60:
                         last_slow = t0
                         day = [p for p in open_pairs if p["start_ts"] and
@@ -576,7 +583,7 @@ async def run_forever(logger=None, path: Optional[str] = None) -> None:
                 except Exception as e:
                     if logger:
                         logger.warning(f"POLY cycle failed: {e!r}")
-                await asyncio.sleep(max(0.5, 5.0 - (time.time() - t0)))
+                await asyncio.sleep(max(0.3, LIVE_EVERY - (time.time() - t0)))
     finally:
         await client.close()
 
@@ -666,10 +673,16 @@ def gap_episodes(ss: List[Dict[str, Any]], threshold: float, max_gap_s: float = 
     return out
 
 
+def late_tolerance(delay: float) -> float:
+    """How far past N seconds a recorded price may be and still count as 'N s late'. Tight, so older
+    5-second data is never passed off as '2 s late'."""
+    return max(2.0, 0.5 * delay)
+
+
 def buy_late(ep: Dict[str, Any], ss: List[Dict[str, Any]], won_a: bool, delay: float) -> Optional[float]:
     for s in ss:
         if s["ts"] >= ep["start"] + delay:
-            if s["ts"] > ep["start"] + delay + 20:
+            if s["ts"] > ep["start"] + delay + late_tolerance(delay):
                 return None
             ask = s[f"k{ep['side']}_ask"]
             if not ask or not 0 < ask < 1:
@@ -679,7 +692,8 @@ def buy_late(ep: Dict[str, Any], ss: List[Dict[str, Any]], won_a: bool, delay: f
     return None
 
 
-def poly_jumps(ss: List[Dict[str, Any]], min_jump: float = 0.03, waits=(0, 5, 15, 30, 60)) -> List[Dict[str, Any]]:
+def poly_jumps(ss: List[Dict[str, Any]], min_jump: float = 0.03,
+               waits=(0, 2, 5, 10, 15, 30, 60)) -> List[Dict[str, Any]]:
     """When Polymarket's middle price for team a jumps 3c+ between samples ~5 s apart: how much of it
     Kalshi's middle price has followed after N seconds, and how much Polymarket kept."""
     out = []
@@ -698,7 +712,7 @@ def poly_jumps(ss: List[Dict[str, Any]], min_jump: float = 0.03, waits=(0, 5, 15
         for w in waits:
             while j < n and ss[j]["ts"] < b["ts"] + w:
                 j += 1
-            if j >= n or ss[j]["ts"] > b["ts"] + w + 12:
+            if j >= n or ss[j]["ts"] > b["ts"] + w + late_tolerance(w):
                 break
             km = _mid(ss[j]["ka_bid"], ss[j]["ka_ask"])
             pm = _mid(ss[j]["pa_bid"], ss[j]["pa_ask"])
@@ -741,8 +755,8 @@ def preview(path: Optional[str] = None) -> Dict[str, Any]:
             "share_gap_2c": gaps2 / n, "share_gap_5c": gaps5 / n}
 
 
-def report(path: Optional[str] = None, thresholds=(0.02, 0.05), delays=(0, 5, 15, 30),
-           waits=(0, 5, 15, 30, 60)) -> Dict[str, Any]:
+def report(path: Optional[str] = None, thresholds=(0.02, 0.05), delays=(0, 2, 5, 10, 15, 30),
+           waits=(0, 2, 5, 10, 15, 30, 60)) -> Dict[str, Any]:
     if not os.path.exists(path or DB_PATH):
         return {"samples": 0}
     with closing(_conn(path)) as c:

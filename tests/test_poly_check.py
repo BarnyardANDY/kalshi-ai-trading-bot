@@ -282,3 +282,21 @@ def test_preview_before_any_game_finishes(tmp_path):
     assert pv["share_gap_5c"] == pytest.approx(1 / 3)          # the moment Polymarket jumped to 0.60
     assert pv["median_diff_c"] == pytest.approx(1.5)            # differences 0.5c, 10.5c, 1.5c
     assert P.report(db)["preview"]["games_sampled"] == 1
+
+
+def test_late_buys_need_a_price_recorded_close_to_that_delay():
+    # old 5-second data: there is no price 2 s after the gap, so '2s late' must stay empty, not borrow +5 s
+    ss5 = [_s(0, (0.49, 0.50), (0.49, 0.51)), _s(5, (0.49, 0.50), (0.59, 0.61)), _s(10, (0.52, 0.53), (0.59, 0.61))]
+    ep = P.gap_episodes(ss5, 0.05)[0]
+    assert P.buy_late(ep, ss5, True, 2) is None
+    assert P.buy_late(ep, ss5, True, 5) is not None
+    # new 2-second data: '2s late' uses the price recorded 2 s after the gap appeared
+    ss2 = [_s(0, (0.49, 0.50), (0.49, 0.51)), _s(2, (0.49, 0.50), (0.59, 0.61)), _s(4, (0.55, 0.56), (0.59, 0.61))]
+    ep = P.gap_episodes(ss2, 0.05)[0]
+    assert P.buy_late(ep, ss2, True, 2) == pytest.approx(1 - 0.56 - P.taker_fee(0.56))
+
+
+def test_both_sites_read_together():
+    import inspect
+    assert "asyncio.gather" in inspect.getsource(P.sample)
+    assert P.LIVE_EVERY == 2.0

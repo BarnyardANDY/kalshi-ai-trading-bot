@@ -650,12 +650,13 @@ with tab_poly:
                                         "share Polymarket kept": st.column_config.NumberColumn(format="percent")})
         st.markdown("#### 3. Buying on Kalshi when it's cheaper than Polymarket")
         st.caption("For each gap: buy on Kalshi at the ask seen 0, 5, 15 or 30 seconds later, pay the fee, hold to "
-                   "the result. ± counts each game once. Positive at 5-15s late = something a home-built bot could catch.")
+                   "the result. ± counts each game once. Live games are recorded every 2 s (from Oct 28; every 5 s before), "
+                   "so the 2s column fills from then on. Positive at 2-5s late = something a home-built bot could catch.")
         if pr.get("gaps"):
-            cfg_ = {c: st.column_config.NumberColumn(format="%+.2f") for c in
-                    ("0s late: c/contract", "5s late: c/contract", "15s late: c/contract", "30s late: c/contract")}
-            cfg_.update({c: st.column_config.NumberColumn(format="%.2f") for c in
-                         ("0s late: ± (c)", "5s late: ± (c)", "15s late: ± (c)", "30s late: ± (c)")})
+            gcols = list(pd.DataFrame(pr["gaps"]).columns)
+            cfg_ = {c: st.column_config.NumberColumn(format="%+.2f") for c in gcols if c.endswith("c/contract")}
+            cfg_.update({c: st.column_config.NumberColumn(format="%.2f") for c in gcols if c.endswith("± (c)")})
+            cfg_["median seconds"] = st.column_config.NumberColumn(format="%.1f")
             st.dataframe(pd.DataFrame(pr["gaps"]), hide_index=True, use_container_width=True, column_config=cfg_)
 
 # ----------------------------------------------------------------------------
