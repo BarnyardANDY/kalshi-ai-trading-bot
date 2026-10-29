@@ -195,3 +195,52 @@ def test_new_arms_start_their_own_clock(tmp_path):
     assert rep["arm_days"]["favorites"] == pytest.approx(8, abs=0.1)
     assert rep["arm_days"]["fav_93_95"] < 0.1
     assert "day 0 of 14" in rep["arms"]["fav_93_95"]["verdict"] or rep["arms"]["fav_93_95"]["verdict"] == "waiting for results"
+
+
+def _stress_rows():
+    """10 days. Each day: 8 Nasdaq bets on 8 different events (they move together) + 4 weather bets.
+    Day 3 is a crash: every Nasdaq bet loses. Otherwise everything wins."""
+    import pandas as pd
+    from datetime import datetime
+    rows, i = [], 0
+    for d in range(10):
+        close = datetime(2026, 10, 20 + d, 16).timestamp()
+        for k in range(12):
+            nas = k < 8
+            series = ["KXNASDAQ100U", "KXNASDAQ100D", "KXNASDAQ100"][k % 3] if nas else "KXHIGHMIA"
+            won = not (nas and d == 3)
+            rows.append({"id": i, "arm": "favorites", "ticker": f"T{i}", "event": f"EV{d}-{k}", "series": series,
+                         "category": "Financials" if nas else "Climate and Weather", "side": "yes", "price": 0.95,
+                         "fee": F.fee_per_contract(0.95), "depth": None if k % 2 else 50, "hours_left": 12,
+                         "entered_ts": close - 12 * 3600, "close_ts": close, "settled_ts": close + 600,
+                         "result": "yes" if won else "no", "pnl": F.pnl_per_contract(0.95, won)})
+            i += 1
+    return F.features(pd.DataFrame(rows))
+
+
+def test_series_family_merges_versions_of_one_underlying():
+    assert F.series_family("KXNASDAQ100U") == F.series_family("KXNASDAQ100D") == F.series_family("KXNASDAQ100")
+    assert F.series_family("KXBTCD") == F.series_family("KXBTC")
+    assert F.series_family("KXHIGHMIA") != F.series_family("KXHIGHNY")
+
+
+def test_stress_counts_bets_that_move_together_as_one():
+    st = F.stress(_stress_rows())
+    by_event, by_day, by_cat = st["margins"]
+    assert by_event["groups"] == 120 and by_day["groups"] == 20 and by_cat["groups"] == 20
+    assert by_day["margin"] > by_event["margin"]           # the crash day counts once, not 8 times
+    assert st["worst_day"]["day"] == "2026-10-23" and st["worst_day"]["losses"] == 8
+    assert st["days"] == 10 and st["days_positive"] == 9
+    assert len(st["without_best_days"]["removed"]) == 5
+
+
+def test_stress_categories_and_stingy_replay():
+    st = F.stress(_stress_rows())
+    cats = {c["category"]: c for c in st["categories"]}
+    assert cats["Financials"]["win rate"] == pytest.approx(72 / 80)
+    assert cats["Climate and Weather"]["win rate"] == 1.0
+    assert sum(c["share of profit"] for c in cats.values()) == pytest.approx(1.0)
+    # $1,000 at 5% = ~52 contracts a bet; half the bets have unknown size -> capped at 10 in the stingy replay
+    normal = F.simulate_bankroll(_stress_rows(), 1000)
+    stingy = st["bankroll_stingy"][1000]
+    assert stingy["contracts_per_bet"] < normal["contracts_per_bet"]

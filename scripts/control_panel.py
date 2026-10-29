@@ -568,6 +568,60 @@ with tab_fav:
                 fig.add_hline(y=pick_b, line_dash="dot", line_color="rgba(128,128,128,0.6)")
                 st.plotly_chart(chart_layout(fig, 280).update_layout(showlegend=True, yaxis_tickprefix="$"),
                                 use_container_width=True)
+            # ---- stress test: is it real, or flattered? ---------------------------------
+            st.markdown("#### Stress test: is it real, or flattered?")
+            st.caption("Five ways the result above could be too good to be true, each checked. An arm worth "
+                       "trusting stays positive at the low end even when bets that move together count as ONE, "
+                       "and without its best days.")
+            sarm = st.radio("Arm ", list(F.ARMS), format_func=lambda a: F.ARMS[a], horizontal=True, key="fav_stress_arm")
+            sx = (fr.get("stress") or {}).get(sarm) or {}
+            if not sx.get("margins"):
+                st.info("Not enough settled bets in this arm yet.")
+            else:
+                def _ok(v):
+                    return "yes" if v is not None and v > 0 else "no" if v is not None else "–"
+                mg = pd.DataFrame(sx["margins"])
+                mg["still positive at the low end?"] = mg["low_end"].map(_ok)
+                st.markdown("**1. Bets that move together, counted as one**")
+                st.dataframe(mg[["counted as one", "groups", "c_per_contract", "margin", "low_end",
+                                 "still positive at the low end?"]], hide_index=True, use_container_width=True,
+                             column_config={"c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                            "margin": st.column_config.NumberColumn("± (¢)", format="%.2f"),
+                                            "low_end": st.column_config.NumberColumn("low end (¢)", format="%+.2f"),
+                                            "groups": st.column_config.NumberColumn("independent groups")})
+                wb = sx.get("without_best_days") or {}
+                a1, a2, a3 = st.columns(3)
+                if wb.get("c_per_contract") is not None:
+                    a1.metric("2. Without the 5 best days", f"{wb['c_per_contract']:+.2f}¢",
+                              f"low end {wb['low_end']:+.2f}¢" if wb.get("low_end") is not None else None,
+                              delta_color="off")
+                wd = sx["worst_day"]
+                a2.metric("3. Worst day (10 per bet)", money(wd["pnl_10"]),
+                          f"{wd['day']}: {wd['losses']} losses of {wd['bets']} bets", delta_color="off")
+                a3.metric("Days in profit", f"{sx['days_positive']} of {sx['days']}",
+                          f"best day {money(sx['best_day']['pnl_10'])} ({sx['best_day']['day']})", delta_color="off")
+                st.markdown("**4. Which market types carry it** (± counts same underlying, same day as one)")
+                st.dataframe(pd.DataFrame(sx["categories"]), hide_index=True, use_container_width=True,
+                             column_config={"win rate": st.column_config.NumberColumn(format="percent"),
+                                            "c_per_contract": st.column_config.NumberColumn("¢ / contract", format="%+.2f"),
+                                            "margin": st.column_config.NumberColumn("± (¢)", format="%.2f"),
+                                            "low_end": st.column_config.NumberColumn("low end (¢)", format="%+.2f"),
+                                            "groups": None,
+                                            "share of profit": st.column_config.NumberColumn(format="percent")})
+                st.markdown("**5. Money replay, stingier:** where we never checked how many contracts were for "
+                            "sale, assume only 10 were.")
+                bs = sx.get("bankroll_stingy") or {}
+                st.dataframe(pd.DataFrame([{"started with": r["start"], "now": r["value"], "P&L": r["pnl"],
+                                            "return": r["ret"], "worst drop": -r["max_drop"],
+                                            "avg contracts per bet": r["contracts_per_bet"]}
+                                           for r in bs.values()]), hide_index=True, use_container_width=True,
+                             column_config={"started with": st.column_config.NumberColumn(format="dollar"),
+                                            "now": st.column_config.NumberColumn(format="dollar"),
+                                            "P&L": st.column_config.NumberColumn(format="dollar"),
+                                            "return": st.column_config.NumberColumn(format="percent"),
+                                            "worst drop": st.column_config.NumberColumn(format="dollar"),
+                                            "avg contracts per bet": st.column_config.NumberColumn(format="%.1f")})
+
             st.markdown("#### Split the results")
             arm_pick = st.radio("Arm", list(F.ARMS), format_func=lambda a: F.ARMS[a], horizontal=True, key="fav_arm")
             sp = fr["splits"].get(arm_pick) or {}

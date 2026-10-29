@@ -402,15 +402,83 @@ SPLITS = {
 }
 
 
+def series_family(series: Optional[str]) -> str:
+    """One name for markets on the same underlying: KXNASDAQ100U / KXNASDAQ100D / KXNASDAQ100 are all the
+    Nasdaq-100, KXBTCD / KXBTC are both bitcoin. Merging too much only widens the margin (the safe side)."""
+    s_ = (series or "?").upper()
+    for suffix in ("U", "D"):
+        if len(s_) > 5 and s_.endswith(suffix):
+            s_ = s_[:-1]
+    return s_
+
+
+def stress(g: pd.DataFrame, top_days: int = 5) -> Dict[str, Any]:
+    """Ways the result could be flattered, each checked: bets that move together counted as one,
+    the best days removed, the worst day, which market types carry it, and a stingier money replay."""
+    from src.edge_scan import _cluster_stats
+    s = g[g["result"].isin(["yes", "no"])] if g is not None and not g.empty else pd.DataFrame()
+    out: Dict[str, Any] = {"settled": len(s)}
+    if s.empty or len(s) < 2:
+        return out
+
+    def stat(sub, col):
+        mean, se, k = _cluster_stats(sub["c"], sub[col])
+        m = 1.96 * se if math.isfinite(se) else None
+        return {"c_per_contract": mean, "margin": m, "groups": k,
+                "low_end": (mean - m) if m is not None else None}
+
+    out["margins"] = [
+        {"counted as one": "each Kalshi event (as on the cards above)", **stat(s, "cluster")},
+        {"counted as one": "same underlying, same day (e.g. all Nasdaq-100 markets on one day)",
+         **stat(s, "cluster_underlying_day")},
+        {"counted as one": "same category, same day (e.g. ALL financial markets on one day)",
+         **stat(s, "cluster_category_day")},
+    ]
+    byday = s.groupby("day").agg(pnl_10=("pnl", lambda x: float(x.sum()) * RULES["order_size"]),
+                                 bets=("pnl", "size"), losses=("pnl", lambda x: int((x <= 0).sum())))
+    byday = byday.sort_values("pnl_10")
+    out["days"] = int(len(byday))
+    out["days_positive"] = int((byday["pnl_10"] > 0).sum())
+    w = byday.iloc[0]
+    b_ = byday.iloc[-1]
+    out["worst_day"] = {"day": byday.index[0], "pnl_10": float(w["pnl_10"]), "bets": int(w["bets"]),
+                        "losses": int(w["losses"])}
+    out["best_day"] = {"day": byday.index[-1], "pnl_10": float(b_["pnl_10"]), "bets": int(b_["bets"]),
+                       "losses": int(b_["losses"])}
+    best = list(byday.index[-top_days:])
+    rest = s[~s["day"].isin(best)]
+    out["without_best_days"] = {"removed": best, **(stat(rest, "cluster_underlying_day") if len(rest) > 1 else {})}
+    cats = []
+    total = float(s["pnl"].sum())
+    for cat, gg in s.groupby(s["category"].fillna("unknown")):
+        st_ = stat(gg, "cluster_underlying_day") if len(gg) > 1 else {"c_per_contract": float(gg["c"].mean()),
+                                                                        "margin": None, "groups": 1, "low_end": None}
+        cats.append({"category": cat, "settled": len(gg), "win rate": float((gg["pnl"] > 0).mean()),
+                     **st_, "share of profit": float(gg["pnl"].sum()) / total if total else None})
+    out["categories"] = sorted(cats, key=lambda r: -r["settled"])
+    out["bankroll_stingy"] = {b: {k: v for k, v in simulate_bankroll(g, b, unknown_depth=10).items() if k != "curve"}
+                              for b in BANKROLLS}
+    return out
+
+
 def features(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return df
     df = df.copy()
+    for col in ("close_ts", "series", "category"):
+        if col not in df:
+            df[col] = None
     df["price_bucket"] = df["price"].map(lambda p: _cut(p, [0.93, 0.96], ["90-92c", "93-95c", "96-98c"]))
     df["hours_bucket"] = df["hours_left"].map(lambda h: _cut(h, [12], ["6-12h", "12-24h"]))
     df["depth_bucket"] = df["depth"].map(lambda d: _cut(d, [10, 100, 1000], ["<10", "10-99", "100-999", "1000+"]))
     df["c"] = 100 * df["pnl"].astype(float)
     df["cluster"] = df["event"].fillna(df["ticker"])
+    # the day the bet's market closed (Eastern): bets on the same underlying that day move together
+    when = df["close_ts"].astype(float).fillna(df["entered_ts"].astype(float))
+    df["day"] = pd.to_datetime(when, unit="s", utc=True).dt.tz_convert(TZ).dt.strftime("%Y-%m-%d")
+    df["family"] = df["series"].map(series_family)
+    df["cluster_underlying_day"] = df["family"] + "|" + df["day"]
+    df["cluster_category_day"] = df["category"].fillna("unknown").astype(str) + "|" + df["day"]
     t = pd.to_datetime(df["entered_ts"], unit="s", utc=True).dt.tz_convert(TZ).dt.tz_localize(None)
     df["entered_et"] = t
     # same buckets as the whale study, so 'evening' means the same thing in both
@@ -455,7 +523,8 @@ BANKROLLS = (100, 500, 1000)
 BET_SHARE = 0.05          # each bet uses up to 5% of the STARTING bankroll (no compounding)
 
 
-def simulate_bankroll(g: pd.DataFrame, start: float, share: float = BET_SHARE) -> Dict[str, Any]:
+def simulate_bankroll(g: pd.DataFrame, start: float, share: float = BET_SHARE,
+                      unknown_depth: Optional[float] = None) -> Dict[str, Any]:
     """Replay one arm's paper bets in time order with ``start`` dollars.
 
     Each bet buys as many contracts as ``share`` of the starting bankroll pays for, capped by
@@ -479,7 +548,7 @@ def simulate_bankroll(g: pd.DataFrame, start: float, share: float = BET_SHARE) -
         if kind == 0:
             per = r.price + fee_per_contract(r.price, 1)
             n = int(share * start // per)
-            depth = r.depth if pd.notna(r.depth) else None
+            depth = r.depth if pd.notna(r.depth) else unknown_depth     # None = assume no limit
             if depth is not None and n > depth:
                 n = int(depth)
                 out["capped"] += 1
@@ -540,4 +609,5 @@ def report(path: Optional[str] = None) -> Dict[str, Any]:
                 sp[lab] = pd.DataFrame(rows_)
         out["splits"][arm] = sp
         out.setdefault("bankroll", {})[arm] = {b: simulate_bankroll(g, b) for b in BANKROLLS}
+        out.setdefault("stress", {})[arm] = stress(g)
     return out
