@@ -52,7 +52,8 @@ VERDICT = {"min_days": 14, "min_events": 300}
 SCAN_SECONDS = 600
 EXCLUDE_PREFIXES = ("KXMVE",)
 ARMS = {"favorites": "All favorites (90-98c, 6-24h)", "whale": "Only after a whale bought the favorite",
-        "fav_93_95": "93-95c favorites only (6-24h)", "fav_1_6h": "Favorites 1-6h before close (90-98c)"}
+        "fav_93_95": "93-95c favorites only (6-24h)", "fav_1_6h": "Favorites 1-6h before close (90-98c)",
+        "fav_econ": "Economics favorites only (90-98c, 6-24h)"}
 # each scanned arm's own rules (the whale arm uses the 'favorites' rules plus its whale trigger)
 ARM_RULES = {
     "favorites": {"min_price": RULES["min_price"], "max_price": RULES["max_price"],
@@ -60,8 +61,13 @@ ARM_RULES = {
     # added Oct 27 from the one-week check-in, each judged ONLY on bets from its own start date:
     "fav_93_95": {"min_price": 0.93, "max_price": 0.955, "min_hours": 6.0, "max_hours": 24.0},
     "fav_1_6h": {"min_price": 0.90, "max_price": 0.98, "min_hours": 1.0, "max_hours": 6.0},
+    # added Oct 29 from the stress test (Economics carried two-thirds of the profit), fresh data only:
+    "fav_econ": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0,
+                 "category": "Economics"},
 }
-NEW_ARMS = ("fav_93_95", "fav_1_6h")
+NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ")
+ARM_ADDED_BECAUSE = {"fav_93_95": "the one-week check-in", "fav_1_6h": "the one-week check-in",
+                     "fav_econ": "the stress test"}
 
 
 # ----------------------------------------------------------------------------
@@ -240,9 +246,15 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
     new_by_arm = {arm: 0 for arm in ARM_RULES}
     depth_cache: Dict[tuple, Optional[float]] = {}
     book_calls = 0          # order-book lookups are capped per scan so a big first scan can't stall the whale arm
+    # categories for the arms limited to one, looked up before deciding (only for markets that qualify)
+    need = [m["ticker"].split("-", 1)[0] for m in markets
+            if any("category" in r and in_window(m, now, r) and favorite(m, r) for r in ARM_RULES.values())]
+    cats = await ensure_categories(client, need, path) if need else series_categories(path)
     for m in markets:
         for arm, rules in ARM_RULES.items():
             if not in_window(m, now, rules):
+                continue
+            if "category" in rules and cats.get(m["ticker"].split("-", 1)[0]) != rules["category"]:
                 continue
             fav = favorite(m, rules)
             if not fav:
@@ -329,6 +341,30 @@ async def settle(client, now: float, path: Optional[str] = None, logger=None) ->
     if n and logger:
         logger.info(f"FAV {n} paper bets settled")
     return n
+
+
+def series_categories(path: Optional[str] = None) -> Dict[str, str]:
+    with closing(_conn(path)) as c:
+        return dict(c.execute("SELECT series, category FROM series_meta").fetchall())
+
+
+async def ensure_categories(client, series: List[str], path: Optional[str] = None,
+                            limit: int = 80) -> Dict[str, str]:
+    """Look up the category of series we haven't seen yet (a few per scan), so an arm limited to one
+    category can decide on the spot. Returns {series: category} for everything known."""
+    known = series_categories(path)
+    todo = [x for x in dict.fromkeys(series) if x not in known][:limit]
+    for sr in todo:
+        try:
+            info = (await client._make_authenticated_request("GET", f"/trade-api/v2/series/{sr}",
+                                                              require_auth=False)).get("series") or {}
+        except Exception:
+            continue                                   # try again next scan
+        known[sr] = info.get("category") or "Unknown"
+        with closing(_conn(path)) as c:
+            c.execute("INSERT OR REPLACE INTO series_meta VALUES (?,?)", (sr, known[sr]))
+            c.commit()
+    return known
 
 
 async def categories(client, path: Optional[str] = None, per_call: int = 20) -> None:

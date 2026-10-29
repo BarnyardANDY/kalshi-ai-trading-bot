@@ -500,8 +500,8 @@ with tab_fav:
             sa = fr["arms"][arm]
             st.markdown(f"#### {label}")
             if arm in F.NEW_ARMS and (fr.get("arm_started") or {}).get(arm):
-                st.caption(f"Added {datetime.fromtimestamp(fr['arm_started'][arm]).strftime('%b %d')} from the "
-                           f"one-week check-in; judged only on bets from that day on (day "
+                st.caption(f"Added {datetime.fromtimestamp(fr['arm_started'][arm]).strftime('%b %d')} from "
+                           f"{F.ARM_ADDED_BECAUSE.get(arm, 'a later review')}; judged only on bets from that day on (day "
                            f"{fr['arm_days'][arm]:.1f} of {F.VERDICT['min_days']}).")
             a, b, cc, d, e = st.columns(5)
             a.metric("Paper bets", f"{sa['bets']:,}", f"{sa['settled']:,} settled", delta_color="off")
@@ -526,7 +526,7 @@ with tab_fav:
         if not done.empty:
             st.markdown("#### Equity (per contract, settled bets)")
             fig = go.Figure()
-            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db")):
+            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c")):
                 g = done[done["arm"] == arm]
                 if not g.empty:
                     fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=F.ARMS[arm],
@@ -559,7 +559,7 @@ with tab_fav:
                 pick_b = st.radio("Show value over time for", list(F.BANKROLLS), horizontal=True,
                                   format_func=lambda b: f"${b:,}", key="fav_bankroll")
                 fig = go.Figure()
-                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db")):
+                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c")):
                     cv = (bk.get(arm) or {}).get(pick_b, {}).get("curve") or []
                     if cv:
                         xs = pd.to_datetime([t for t, _ in cv], unit="s", utc=True).tz_convert("America/New_York").tz_localize(None)

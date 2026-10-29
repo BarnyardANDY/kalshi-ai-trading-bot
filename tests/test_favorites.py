@@ -68,7 +68,7 @@ def test_scan_records_once_then_settles(tmp_path):
     r = asyncio.run(F.scan_favorites(c, NOW, db))
     assert (r["markets"], r["qualifying"], r["new"]) == (4, 2, 2)
     # E1-A (95c, 12h) also fits the 93-95c arm; E4-D (95c, 2h) fits only the 1-6h arm
-    assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1}
+    assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1, "fav_econ": 0}   # Fake says "Sports"
     assert asyncio.run(F.scan_favorites(c, NOW + 600, db))["new"] == 0          # one bet per market
     df = F.rows(db)
     df = df[df["arm"] == "favorites"]
@@ -244,3 +244,29 @@ def test_stress_categories_and_stingy_replay():
     normal = F.simulate_bankroll(_stress_rows(), 1000)
     stingy = st["bankroll_stingy"][1000]
     assert stingy["contracts_per_bet"] < normal["contracts_per_bet"]
+
+
+def test_economics_arm_only_takes_economics_and_looks_categories_up_first(tmp_path):
+    db = str(tmp_path / "f.db")
+
+    class EconFake(Fake):
+        def __init__(self, markets):
+            super().__init__(markets)
+            self.series_calls = []
+
+        async def _make_authenticated_request(self, method, endpoint, params=None, require_auth=True):
+            if endpoint.endswith("/markets"):
+                return {"markets": list(self.markets.values())}
+            sr = endpoint.rsplit("/", 1)[-1]
+            self.series_calls.append(sr)
+            return {"series": {"category": "Economics" if sr == "KXAAAGASD" else "Sports"}}
+
+    c = EconFake([mk("KXAAAGASD-26OCT30-4.30", .94, .95), mk("KXNBAGAME-26OCT30BOSNYK-BOS", .94, .95)])
+    r = asyncio.run(F.scan_favorites(c, NOW, db))
+    assert r["new_by_arm"]["fav_econ"] == 1 and r["new_by_arm"]["favorites"] == 2
+    df = F.rows(db)
+    assert list(df[df["arm"] == "fav_econ"]["ticker"]) == ["KXAAAGASD-26OCT30-4.30"]
+    assert set(c.series_calls) == {"KXAAAGASD", "KXNBAGAME"}
+    asyncio.run(F.scan_favorites(c, NOW + 600, db))
+    assert len(c.series_calls) == 2                         # known categories aren't asked again
+    assert "fav_econ" in F.NEW_ARMS and F.ARM_ADDED_BECAUSE["fav_econ"] == "the stress test"
