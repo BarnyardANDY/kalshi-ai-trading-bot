@@ -231,7 +231,7 @@ def test_stress_counts_bets_that_move_together_as_one():
     assert by_day["margin"] > by_event["margin"]           # the crash day counts once, not 8 times
     assert st["worst_day"]["day"] == "2026-10-23" and st["worst_day"]["losses"] == 8
     assert st["days"] == 10 and st["days_positive"] == 9
-    assert len(st["without_best_days"]["removed"]) == 5
+    assert [w["days removed"] for w in st["without_best"]] == [1, 2]        # 5 only once there are 25+ days
 
 
 def test_stress_categories_and_stingy_replay():

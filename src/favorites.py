@@ -412,7 +412,7 @@ def series_family(series: Optional[str]) -> str:
     return s_
 
 
-def stress(g: pd.DataFrame, top_days: int = 5) -> Dict[str, Any]:
+def stress(g: pd.DataFrame) -> Dict[str, Any]:
     """Ways the result could be flattered, each checked: bets that move together counted as one,
     the best days removed, the worst day, which market types carry it, and a stingier money replay."""
     from src.edge_scan import _cluster_stats
@@ -445,9 +445,19 @@ def stress(g: pd.DataFrame, top_days: int = 5) -> Dict[str, Any]:
                         "losses": int(w["losses"])}
     out["best_day"] = {"day": byday.index[-1], "pnl_10": float(b_["pnl_10"]), "bets": int(b_["bets"]),
                        "losses": int(b_["losses"])}
-    best = list(byday.index[-top_days:])
-    rest = s[~s["day"].isin(best)]
-    out["without_best_days"] = {"removed": best, **(stat(rest, "cluster_underlying_day") if len(rest) > 1 else {})}
+    # Remove the best day(s). Removing 5 of only ~11 days takes out nearly half the sample and is too harsh
+    # for a strategy whose bad days are rare and large, so: the best 1 and 2 days, and the best 5 only
+    # once there are 25+ days.
+    out["without_best"] = []
+    for n in (1, 2, 5):
+        if n == 5 and len(byday) < 25:
+            continue
+        if len(byday) <= n:
+            continue
+        best = list(byday.index[-n:])
+        rest = s[~s["day"].isin(best)]
+        if len(rest) > 1:
+            out["without_best"].append({"days removed": n, "removed": best, **stat(rest, "cluster_underlying_day")})
     cats = []
     total = float(s["pnl"].sum())
     for cat, gg in s.groupby(s["category"].fillna("unknown")):

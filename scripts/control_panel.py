@@ -589,12 +589,15 @@ with tab_fav:
                                             "margin": st.column_config.NumberColumn("± (¢)", format="%.2f"),
                                             "low_end": st.column_config.NumberColumn("low end (¢)", format="%+.2f"),
                                             "groups": st.column_config.NumberColumn("independent groups")})
-                wb = sx.get("without_best_days") or {}
-                a1, a2, a3 = st.columns(3)
-                if wb.get("c_per_contract") is not None:
-                    a1.metric("2. Without the 5 best days", f"{wb['c_per_contract']:+.2f}¢",
-                              f"low end {wb['low_end']:+.2f}¢" if wb.get("low_end") is not None else None,
-                              delta_color="off")
+                wbs = sx.get("without_best") or []
+                cols_ = st.columns(len(wbs) + 2)
+                for col_, wb in zip(cols_, wbs):
+                    n_ = wb["days removed"]
+                    col_.metric(f"2. Without the best {'day' if n_ == 1 else f'{n_} days'}",
+                                f"{wb['c_per_contract']:+.2f}¢",
+                                f"low end {wb['low_end']:+.2f}¢" if wb.get("low_end") is not None else None,
+                                delta_color="off")
+                a2, a3 = cols_[-2], cols_[-1]
                 wd = sx["worst_day"]
                 a2.metric("3. Worst day (10 per bet)", money(wd["pnl_10"]),
                           f"{wd['day']}: {wd['losses']} losses of {wd['bets']} bets", delta_color="off")
