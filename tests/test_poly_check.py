@@ -300,3 +300,67 @@ def test_both_sites_read_together():
     import inspect
     assert "asyncio.gather" in inspect.getsource(P.sample)
     assert P.LIVE_EVERY == 2.0
+
+
+def _book(no_bids):
+    """Kalshi book with NO bids [(price, size)]: a NO bid at p = a YES offer at 1 - p."""
+    return {"orderbook": {"no_dollars": [[f"{p:.2f}", str(sz)] for p, sz in no_bids], "yes_dollars": []}}
+
+
+def test_book_asks_turn_no_bids_into_yes_offers():
+    assert P.book_asks(_book([(0.48, 30), (0.45, 100)])) == [(0.52, 30.0), (0.55, 100.0)]
+    assert P.book_asks({"weird": 1}) is None
+    s = P.summarize_book(_book([(0.48, 30), (0.45, 100)]), poly_mid=0.60)
+    assert s["book_ask"] == 0.52 and s["ask_size"] == 30
+    # 2c+ edge after the fee at Polymarket 0.60: 0.52 yes (+6c), 0.55 yes (+3c-ish)
+    assert s["size_2c"] == 130
+    assert P.summarize_book(_book([]), 0.6) == {"readable": 1, "book_ask": None, "ask_size": 0.0, "size_2c": 0.0}
+
+
+def test_gap_triggers_a_book_check_now_and_two_seconds_later(tmp_path):
+    db = str(tmp_path / "p.db")
+    P._LAST_CHECK.clear()
+
+    class K:
+        def __init__(self):
+            self.calls = []
+
+        async def get_markets(self, limit=100, tickers=None):
+            m = {"ka": {"ticker": "ka", "yes_bid_dollars": "0.49", "yes_ask_dollars": "0.50"},
+                 "kb": {"ticker": "kb", "yes_bid_dollars": "0.50", "yes_ask_dollars": "0.51"}}
+            return {"markets": [m[t] for t in tickers or [] if t in m]}
+
+        async def get_orderbook(self, t):
+            self.calls.append((t, time.time()))
+            return _book([(0.50, 40)])                         # YES really offered at 0.50, 40 contracts
+
+    class H:
+        async def post(self, url, json=None):
+            return FakeResp({"pa": {"BUY": 0.59, "SELL": 0.61}, "pb": {"BUY": 0.39, "SELL": 0.41}})
+
+    pair = {"pair_id": "G", "k_ticker_a": "ka", "k_ticker_b": "kb", "poly_token_a": "pa", "poly_token_b": "pb",
+            "start_ts": 0}
+    P.BOOK_CHECK_DELAYS_SAVED = P.BOOK_CHECK_DELAYS
+    P.BOOK_CHECK_DELAYS = (0.0, 0.2)                           # keep the test quick
+
+    async def go():
+        k = K()
+        now = time.time()
+        await P.sample(k, H(), [pair], now, db)
+        await P.sample(k, H(), [pair], now + 1, db)           # same gap 1 s later: no second check
+        await asyncio.sleep(0.5)
+        return k
+    try:
+        k = asyncio.run(go())
+    finally:
+        P.BOOK_CHECK_DELAYS = P.BOOK_CHECK_DELAYS_SAVED
+    assert [t for t, _ in k.calls] == ["ka", "ka"]
+    with P.closing(P._conn(db)) as c:
+        c.execute("INSERT INTO pairs (pair_id, league, poly_slug, kalshi_event, team_a, team_b, k_ticker_a, k_ticker_b,"
+                  " poly_token_a, poly_token_b, start_ts, matched_how, created_ts, result_a) VALUES "
+                  "('G','nba','s','e','a','b','ka','kb','pa','pb',0,'names',0,'yes')")
+        c.commit()
+    rep = P.book_report(db)
+    assert len(rep) == 2 and rep[0]["checks"] == 1 and rep[0]["cheap price really there"] == 1.0
+    assert rep[0]["median contracts at 2c+ edge"] == 40
+    assert rep[0]["buy at real price: c/contract"] == pytest.approx(100 * (1 - 0.50 - P.taker_fee(0.50)))

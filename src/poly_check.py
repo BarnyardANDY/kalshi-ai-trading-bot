@@ -250,6 +250,11 @@ def _conn(path: Optional[str] = None) -> sqlite3.Connection:
                  pa_bid REAL, pa_ask REAL, pb_bid REAL, pb_ask REAL)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_poly_samples ON samples(pair_id, ts)")
     c.execute("CREATE TABLE IF NOT EXISTS discovery (ts REAL PRIMARY KEY, info TEXT)")
+    # Kalshi's REAL order book read at the moment a 5c+ gap shows up, and 2 s later: did the cheap price
+    # actually exist (the market summary we sample might lag the book), and how much could you buy?
+    c.execute("""CREATE TABLE IF NOT EXISTS book_checks (ts REAL, gap_ts REAL, pair_id TEXT, side TEXT,
+                 delay REAL, summary_ask REAL, poly_mid REAL, book_ask REAL, ask_size REAL, size_2c REAL,
+                 readable INTEGER)""")
     return c
 
 
@@ -517,7 +522,116 @@ async def sample(client, http, pl: List[Dict[str, Any]], now: float, path: Optio
         with closing(_conn(path)) as c:
             c.executemany("INSERT INTO samples VALUES (?,?,?,?,?,?,?,?,?,?,?)", rows)
             c.commit()
+        byid = {p["pair_id"]: p for p in pl}
+        for r in rows:
+            s_ = dict(zip(("ts", "pair_id", "live", "ka_bid", "ka_ask", "kb_bid", "kb_ask", "pa_bid", "pa_ask",
+                           "pb_bid", "pb_ask"), r))
+            for v in side_views(s_):
+                ask, pm = v["k_ask"], v["p_mid"]
+                if pm is None or not ask or not 0 < ask < 1:
+                    continue
+                if pm - ask - taker_fee(ask) >= BOOK_CHECK_EDGE:
+                    p = byid[s_["pair_id"]]
+                    schedule_book_check(client, p, v["side"], ask, pm, now, path)
     return len(rows)
+
+
+# ----------------------------------------------------------------------------
+# Order-book check at gap moments
+# ----------------------------------------------------------------------------
+
+BOOK_CHECK_EDGE = 0.05          # check the real book when the summary shows a 5c+ gap after the fee
+BOOK_CHECK_DELAYS = (0.0, 2.0)  # right away, and 2 s later (what a home-built bot could realistically hit)
+BOOK_CHECK_EVERY = 15.0         # at most one check per game and side every 15 s
+BOOK_CHECK_MAX_ACTIVE = 8
+_LAST_CHECK: Dict[Tuple[str, str], float] = {}
+_ACTIVE: set = set()
+
+
+def book_asks(orderbook: Dict[str, Any]) -> Optional[List[Tuple[float, float]]]:
+    """(price, contracts) you could BUY YES at, cheapest first. Kalshi lists bids only: a NO bid at p
+    is a YES offer at 1 - p. None if the book can't be read."""
+    from src.maker import _book_levels
+    no_bids = _book_levels(orderbook or {}, "no")
+    if no_bids is None:
+        return None
+    return sorted((round(1 - pr, 4), sz) for pr, sz in no_bids if 0 < pr < 1 and sz > 0)
+
+
+def summarize_book(orderbook: Dict[str, Any], poly_mid: float, min_edge: float = 0.02) -> Dict[str, Any]:
+    asks = book_asks(orderbook)
+    if asks is None:
+        return {"readable": 0}
+    if not asks:
+        return {"readable": 1, "book_ask": None, "ask_size": 0.0, "size_2c": 0.0}
+    best, size = asks[0]
+    size_best = sum(sz for pr, sz in asks if abs(pr - best) < 1e-6)
+    size_2c = sum(sz for pr, sz in asks if poly_mid - pr - taker_fee(pr) >= min_edge)
+    return {"readable": 1, "book_ask": best, "ask_size": size_best, "size_2c": size_2c}
+
+
+def schedule_book_check(client, p: Dict[str, Any], side: str, summary_ask: float, poly_mid: float,
+                        gap_ts: float, path: Optional[str] = None) -> bool:
+    key = (p["pair_id"], side)
+    if gap_ts - _LAST_CHECK.get(key, -1e18) < BOOK_CHECK_EVERY or len(_ACTIVE) >= BOOK_CHECK_MAX_ACTIVE:
+        return False
+    _LAST_CHECK[key] = gap_ts
+    ticker = p["k_ticker_a"] if side == "a" else p["k_ticker_b"]
+    task = asyncio.ensure_future(book_check(client, p["pair_id"], side, ticker, summary_ask, poly_mid, gap_ts, path))
+    _ACTIVE.add(task)
+    task.add_done_callback(_ACTIVE.discard)
+    return True
+
+
+async def book_check(client, pair_id: str, side: str, ticker: str, summary_ask: float, poly_mid: float,
+                     gap_ts: float, path: Optional[str] = None) -> None:
+    for delay in BOOK_CHECK_DELAYS:
+        wait = gap_ts + delay - time.time()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            book = await client.get_orderbook(ticker)
+            info = summarize_book(book, poly_mid)
+        except Exception:
+            info = {"readable": 0}
+        with closing(_conn(path)) as c:
+            c.execute("INSERT INTO book_checks VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                      (time.time(), gap_ts, pair_id, side, delay, summary_ask, poly_mid, info.get("book_ask"),
+                       info.get("ask_size"), info.get("size_2c"), info.get("readable", 0)))
+            c.commit()
+
+
+def book_report(path: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Per delay: did the gap exist in the real book, how big was it there, how much was for sale, and
+    what buying at the REAL best ask would have earned on finished games (each game counted once)."""
+    with closing(_conn(path)) as c:
+        c.row_factory = sqlite3.Row
+        rows = [dict(r) for r in c.execute("SELECT * FROM book_checks")]
+    if not rows:
+        return []
+    res = {p["pair_id"]: p["result_a"] for p in pairs(path) if p["result_a"] in ("yes", "no")}
+    out = []
+    for d in sorted({r["delay"] for r in rows}):
+        rs = [r for r in rows if r["delay"] == d]
+        ok = [r for r in rs if r["readable"] and r["book_ask"] is not None]
+        real = [r for r in ok if r["book_ask"] <= r["summary_ask"] + 0.005]
+        edges = [100 * (r["poly_mid"] - r["book_ask"] - taker_fee(r["book_ask"])) for r in ok]
+        pnl = []
+        for r in ok:
+            ra = res.get(r["pair_id"])
+            if ra is None:
+                continue
+            won = (ra == "yes") == (r["side"] == "a")
+            pnl.append((r["pair_id"], (1.0 if won else 0.0) - r["book_ask"] - taker_fee(r["book_ask"])))
+        mean, margin, games = _clustered(pnl)
+        out.append({"when": f"{d:.0f}s after the gap", "checks": len(rs), "book readable": len(ok),
+                    "cheap price really there": (len(real) / len(ok)) if ok else None,
+                    "median edge in the book (c)": statistics.median(edges) if edges else None,
+                    "median contracts at 2c+ edge": statistics.median([r["size_2c"] or 0 for r in ok]) if ok else None,
+                    "share with 10+ contracts": (sum((r["size_2c"] or 0) >= 10 for r in ok) / len(ok)) if ok else None,
+                    "buy at real price: c/contract": mean, "buy at real price: ± (c)": margin,
+                    "finished games": games})
+    return out
 
 
 async def settle(client, now: float, path: Optional[str] = None, logger=None) -> int:
@@ -822,6 +936,7 @@ def report(path: Optional[str] = None, thresholds=(0.02, 0.05), delays=(0, 2, 5,
             "by_league": {lg: sum(1 for p in allp if p["league"] == lg) for lg in LEAGUES},
             "discovery": json.loads(disc[0]) if disc else {}, "calibration": calibration, "gaps": gaps,
             "lag": lag, "jumps": len(jumps), "computed_ts": time.time(), "preview": preview(path),
+            "book": book_report(path),
             "summary_line": f"{n_samples:,} samples, {len(allp)} games matched, {len(settled)} settled"
                             + (f"; best at 5s late: {best[1]} {best[2]:+.2f}c ±{best[3]:.2f}" if best else "")}
 

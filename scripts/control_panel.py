@@ -715,6 +715,23 @@ with tab_poly:
             cfg_.update({c: st.column_config.NumberColumn(format="%.2f") for c in gcols if c.endswith("± (c)")})
             cfg_["median seconds"] = st.column_config.NumberColumn(format="%.1f")
             st.dataframe(pd.DataFrame(pr["gaps"]), hide_index=True, use_container_width=True, column_config=cfg_)
+        st.markdown("#### 4. Were the gaps really there? (Kalshi's actual order book)")
+        st.caption("The prices above come from Kalshi's market summary, which might lag its real order book. So "
+                   "whenever a 5c+ gap shows up, the study also reads Kalshi's actual order book right away and 2 s "
+                   "later: was the cheap price really for sale, how many contracts, and what would buying at that "
+                   "REAL price have earned (finished games only, each game counted once). If 'really there' is "
+                   "high and the real-price result stays positive, the gaps are real and catchable.")
+        bk_ = pr.get("book") or []
+        if not bk_:
+            st.info("No order-book checks yet: they start with the next live games after this update.")
+        else:
+            st.dataframe(pd.DataFrame(bk_), hide_index=True, use_container_width=True,
+                         column_config={"cheap price really there": st.column_config.NumberColumn(format="percent"),
+                                        "median edge in the book (c)": st.column_config.NumberColumn(format="%+.1f"),
+                                        "median contracts at 2c+ edge": st.column_config.NumberColumn(format="%.0f"),
+                                        "share with 10+ contracts": st.column_config.NumberColumn(format="percent"),
+                                        "buy at real price: c/contract": st.column_config.NumberColumn(format="%+.2f"),
+                                        "buy at real price: ± (c)": st.column_config.NumberColumn(format="%.2f")})
 
 # ----------------------------------------------------------------------------
 # Speed gaps (15-minute crypto study)
