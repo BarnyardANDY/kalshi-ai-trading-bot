@@ -270,3 +270,32 @@ def test_economics_arm_only_takes_economics_and_looks_categories_up_first(tmp_pa
     asyncio.run(F.scan_favorites(c, NOW + 600, db))
     assert len(c.series_calls) == 2                         # known categories aren't asked again
     assert "fav_econ" in F.NEW_ARMS and F.ARM_ADDED_BECAUSE["fav_econ"] == "the stress test"
+
+
+def test_best_ask_reads_the_other_sides_bids():
+    book = {"orderbook": {"yes_dollars": [["0.03", 10], ["0.04", 300]], "no_dollars": [["0.05", 120], ["0.04", 9]]}}
+    assert F.best_ask(book, "yes") == pytest.approx(0.95)       # best NO bid 0.05 -> YES offered at 0.95
+    assert F.best_ask(book, "no") == pytest.approx(0.96)        # best YES bid 0.04 -> NO offered at 0.96
+    assert F.best_ask({"orderbook": {"yes_dollars": [], "no_dollars": []}}, "yes") is None
+
+
+def test_scan_records_the_real_best_price(tmp_path):
+    db = str(tmp_path / "f.db")
+    asyncio.run(F.scan_favorites(Fake([mk("E1-A", .94, .95)]), NOW, db))
+    r = F.rows(db)
+    r = r[r["arm"] == "favorites"].iloc[0]
+    assert r["depth"] == 120 and r["book_ask"] == pytest.approx(0.95)
+
+
+def test_real_price_check_separates_bets_that_were_really_buyable():
+    df = _stress_rows()
+    df["book_ask"] = None
+    df.loc[df.index[:20], "book_ask"] = 0.97                    # these 20 really cost 2c more than we recorded
+    df.loc[df["depth"].notna() & (df.index % 4 == 0), "depth"] = 0     # some recorded prices weren't for sale
+    rp = F.real_price_check(df[df["result"].isin(["yes", "no"])])
+    checked = df["depth"].notna().sum()
+    there = (df["depth"].fillna(-1) > 0).sum()
+    assert rp["checked"] == checked and rp["really_there"] == pytest.approx(there / checked)
+    assert rp["only_really_there"]["bets"] == there
+    assert rp["with_real_price"] == 20 and rp["median_real_minus_ours_c"] == pytest.approx(2.0)
+    assert F.stress(df)["real_price"]["checked"] == checked

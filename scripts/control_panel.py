@@ -625,6 +625,29 @@ with tab_fav:
                                             "worst drop": st.column_config.NumberColumn(format="dollar"),
                                             "avg contracts per bet": st.column_config.NumberColumn(format="%.1f")})
 
+                rp = sx.get("real_price") or {}
+                st.markdown("**6. Was our price really for sale?** (Kalshi's price summary can lag its real order "
+                            "book: that's what made the Polymarket gaps look real.)")
+                if not rp.get("checked"):
+                    st.info("No order-book readings for this arm's settled bets yet.")
+                else:
+                    r1, r2, r3 = st.columns(3)
+                    r1.metric("Price really there", f"{rp['really_there']:.0%}",
+                              f"of {rp['checked']:,} settled bets whose order book we read", delta_color="off")
+                    ort = rp.get("only_really_there") or {}
+                    if ort.get("c_per_contract") is not None:
+                        r2.metric("Counting only those bets", f"{ort['c_per_contract']:+.2f}¢",
+                                  f"low end {ort['low_end']:+.2f}¢" if ort.get("low_end") is not None else None,
+                                  delta_color="off")
+                    arp = rp.get("at_real_price") or {}
+                    if arp.get("c_per_contract") is not None:
+                        r3.metric("Paying the real best price", f"{arp['c_per_contract']:+.2f}¢",
+                                  f"{rp['with_real_price']:,} bets; real price {rp['median_real_minus_ours_c']:+.1f}¢ vs ours "
+                                  "(median)", delta_color="off")
+                    else:
+                        r3.metric("Paying the real best price", "–", "recorded for bets from Oct 29 on",
+                                  delta_color="off")
+
             st.markdown("#### Split the results")
             arm_pick = st.radio("Arm", list(F.ARMS), format_func=lambda a: F.ARMS[a], horizontal=True, key="fav_arm")
             sp = fr["splits"].get(arm_pick) or {}

@@ -31,7 +31,7 @@ import os
 import sqlite3
 import time
 from contextlib import closing
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
@@ -147,6 +147,8 @@ def _conn(path: Optional[str] = None) -> sqlite3.Connection:
     c.execute("CREATE TABLE IF NOT EXISTS series_meta (series TEXT PRIMARY KEY, category TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
     c.execute("CREATE TABLE IF NOT EXISTS scans (ts REAL PRIMARY KEY, markets INTEGER, qualifying INTEGER)")
+    if "book_ask" not in {r[1] for r in c.execute("PRAGMA table_info(bets)")}:
+        c.execute("ALTER TABLE bets ADD COLUMN book_ask REAL")      # real best price in the order book at entry
     return c
 
 
@@ -175,7 +177,8 @@ def _known(path: Optional[str], arm: str) -> set:
 
 
 def record(path: Optional[str], arm: str, m: Dict[str, Any], fav: Dict[str, Any], now: float,
-           depth: Optional[float] = None, whale: Optional[Dict[str, Any]] = None) -> bool:
+           depth: Optional[float] = None, whale: Optional[Dict[str, Any]] = None,
+           book_ask: Optional[float] = None) -> bool:
     from src.whale import ts_of
     title = " — ".join(x for x in (m.get("title"), m.get("yes_sub_title")) if x)[:200]
     vol = None
@@ -188,12 +191,12 @@ def record(path: Optional[str], arm: str, m: Dict[str, Any], fav: Dict[str, Any]
     with closing(_conn(path)) as c:
         cur = c.execute(
             """INSERT OR IGNORE INTO bets (arm, ticker, event, series, title, side, price, bid, spread, fee, depth,
-               volume_24h, entered_ts, close_ts, hours_left, whale_notional, whale_price)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               volume_24h, entered_ts, close_ts, hours_left, whale_notional, whale_price, book_ask)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (arm, m["ticker"], m.get("event_ticker"), m["ticker"].split("-", 1)[0], title, fav["side"], fav["price"],
              fav["bid"], fav["spread"], fee_per_contract(fav["price"]), depth,
              vol, now, ts_of(m.get("close_time")), hours_left(m, now),
-             (whale or {}).get("notional"), (whale or {}).get("vwap")))
+             (whale or {}).get("notional"), (whale or {}).get("vwap"), book_ask))
         c.commit()
         return cur.rowcount > 0
 
@@ -230,12 +233,25 @@ async def fetch_window(client, now: float, max_pages: int = 30) -> List[Dict[str
     return out
 
 
-async def _depth(client, ticker: str, side: str, price: float) -> Optional[float]:
+def best_ask(book: Dict[str, Any], side: str) -> Optional[float]:
+    """Cheapest price you could really buy ``side`` at. Kalshi lists bids only: buying YES at p means
+    hitting a NO bid at 1 - p (and vice versa). None if unreadable or nothing offered."""
+    from src.maker import _book_levels
+    other = _book_levels(book or {}, "no" if side == "yes" else "yes")
+    if not other:
+        return None
+    top = max((pr for pr, sz in other if 0 < pr < 1 and sz > 0), default=None)
+    return round(1 - top, 4) if top is not None else None
+
+
+async def _book_info(client, ticker: str, side: str, price: float) -> Tuple[Optional[float], Optional[float]]:
+    """(contracts offered at our price, real best price) from one order-book read; (None, None) on failure."""
     from src.arb_scan import depth_at_ask
     try:
-        return depth_at_ask(await client.get_orderbook(ticker), side, price)
+        book = await client.get_orderbook(ticker)
     except Exception:
-        return None
+        return None, None
+    return depth_at_ask(book, side, price), best_ask(book, side)
 
 
 async def scan_favorites(client, now: float, path: Optional[str] = None, logger=None,
@@ -265,11 +281,12 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
                 continue
             key = (m["ticker"], fav["side"], fav["price"])
             if key not in depth_cache:
-                depth_cache[key] = None
+                depth_cache[key] = (None, None)
                 if book_calls < 300:
                     book_calls += 1
-                    depth_cache[key] = await _depth(client, m["ticker"], fav["side"], fav["price"])
-            if record(path, arm, m, fav, now, depth_cache[key]):
+                    depth_cache[key] = await _book_info(client, m["ticker"], fav["side"], fav["price"])
+            depth, real_ask = depth_cache[key]
+            if record(path, arm, m, fav, now, depth, book_ask=real_ask):
                 new_by_arm[arm] += 1
                 if arm == "favorites":
                     new += 1
@@ -306,8 +323,8 @@ async def whale_entries(client, pending: List[Dict[str, Any]], now: float, path:
         fav = favorite(m)
         if not fav or fav["side"] != p["side"]:
             continue                                  # the whale's side is no longer a buyable 90-98c favorite
-        depth = await _depth(client, m["ticker"], fav["side"], fav["price"])
-        if record(path, "whale", m, fav, now, depth, whale=p):
+        depth, real_ask = await _book_info(client, m["ticker"], fav["side"], fav["price"])
+        if record(path, "whale", m, fav, now, depth, whale=p, book_ask=real_ask):
             known.add(p["ticker"])
             n += 1
     if n and logger:
@@ -504,6 +521,42 @@ def stress(g: pd.DataFrame) -> Dict[str, Any]:
     out["categories"] = sorted(cats, key=lambda r: -r["settled"])
     out["bankroll_stingy"] = {b: {k: v for k, v in simulate_bankroll(g, b, unknown_depth=10).items() if k != "curve"}
                               for b in BANKROLLS}
+    out["real_price"] = real_price_check(s)
+    return out
+
+
+def real_price_check(s: pd.DataFrame) -> Dict[str, Any]:
+    """Was our recorded price actually for sale in Kalshi's order book when we 'bought'? (The market summary
+    can lag the book: that is what made the Polymarket gaps look real.) 'Really there' = contracts were offered
+    at our price; judged only on bets whose book we read. Also: the result counting only those bets, and the
+    result if you had paid the real best price (recorded from Oct 29 on)."""
+    from src.edge_scan import _cluster_stats
+    if "book_ask" not in s:
+        s = s.assign(book_ask=None)
+    checked = s[s["depth"].notna()]
+    out: Dict[str, Any] = {"settled": len(s), "checked": len(checked)}
+    if checked.empty:
+        return out
+    there = checked[checked["depth"].astype(float) > 0]
+    out["really_there"] = len(there) / len(checked)
+
+    def stat(sub, col="c"):
+        if len(sub) < 2:
+            return {}
+        mean, se, k = _cluster_stats(sub[col].astype(float), sub["cluster_underlying_day"])
+        m = 1.96 * se if math.isfinite(se) else None
+        return {"c_per_contract": mean, "margin": m, "low_end": (mean - m) if m is not None else None, "bets": len(sub)}
+
+    out["only_really_there"] = stat(there)
+    real = s[s["book_ask"].notna()].copy()
+    out["with_real_price"] = len(real)
+    if len(real):
+        won = real["result"] == real["side"]
+        real["c_real"] = 100 * (won.astype(float) - real["book_ask"].astype(float)
+                                - real["book_ask"].astype(float).map(fee_per_contract))
+        real["diff_c"] = 100 * (real["book_ask"].astype(float) - real["price"].astype(float))
+        out["at_real_price"] = stat(real, "c_real")
+        out["median_real_minus_ours_c"] = float(real["diff_c"].median())
     return out
 
 
