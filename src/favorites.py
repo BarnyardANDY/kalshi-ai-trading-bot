@@ -66,6 +66,8 @@ ARM_RULES = {
                  "category": "Economics"},
 }
 NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ")
+# shown first on the dashboard; the rest still collect (paper costs nothing) but sit in a collapsed section
+MAIN_ARMS = ("favorites", "fav_93_95", "fav_econ")
 ARM_ADDED_BECAUSE = {"fav_93_95": "the one-week check-in", "fav_1_6h": "the one-week check-in",
                      "fav_econ": "the stress test"}
 

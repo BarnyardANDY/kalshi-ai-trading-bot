@@ -141,11 +141,16 @@ cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
 # Live tests first; finished ones live in the Archive tab (their numbers stay, frozen).
-tab_fav, tab_poly, tab_maker, tab_whale, tab_ctrl, tab_arch = st.tabs(
-    ["Favorites test", "Polymarket check", "Maker test", "Whale follow", "Strategy controls", "Archive"])
+tab_fav, tab_ctrl, tab_arch = st.tabs(["Favorites test", "Strategy controls", "Archive"])
 with tab_arch:
-    st.caption("Finished tests, kept for the record. None of these found an edge; their processes are stopped "
-               "and their numbers are frozen at the end.")
+    st.caption("Finished tests, kept for the record. None of these found an edge you could trade; their "
+               "processes are stopped and their numbers are frozen at the end.")
+    tab_poly = st.expander("Polymarket check (stopped Oct 30: the 'gaps' were Kalshi's price summary lagging; the "
+                           "cheap price was really in the order book only 1-2% of the time)")
+    tab_whale = st.expander("Whale follow (stopped Oct 27: copying big trades loses; its best leads moved into the "
+                            "Favorites test)")
+    tab_maker = st.expander("Maker test, v1 and v2 (stopped Oct 27: about -5c per contract, filled mostly when the "
+                            "price was falling)")
     tab_perf = st.expander("Original AI bot: performance (no edge vs. the market; bot off)")
     tab_pos = st.expander("Original AI bot: open positions")
     tab_learn = st.expander("Original AI bot: learning")
@@ -496,7 +501,7 @@ with tab_fav:
                     f"{fr['qualifying_per_scan']:.0f} markets qualify per scan. Verdict rule (fixed in advance): "
                     f"after {F.VERDICT['min_days']} days and {F.VERDICT['min_events']} separate settled events, an arm "
                     "passes only if its ¢/contract is above zero by more than its ± margin.")
-        for arm, label in F.ARMS.items():
+        def _arm_card(arm, label):
             sa = fr["arms"][arm]
             st.markdown(f"#### {label}")
             if arm in F.NEW_ARMS and (fr.get("arm_started") or {}).get(arm):
@@ -518,6 +523,14 @@ with tab_fav:
                 st.error(f"Verdict: {sa['verdict']}")
             else:
                 st.info(f"Verdict: {sa['verdict']}")
+
+        for arm in F.MAIN_ARMS:
+            _arm_card(arm, F.ARMS[arm])
+        with st.expander("Other arms, still collecting until their verdict dates (no edge so far): "
+                         + ", ".join(F.ARMS[a] for a in F.ARMS if a not in F.MAIN_ARMS)):
+            for arm in F.ARMS:
+                if arm not in F.MAIN_ARMS:
+                    _arm_card(arm, F.ARMS[arm])
         st.caption("Win rate vs. break-even is the whole story here: at ~95c you win ~5c most of the time and lose "
                    "~95c when the favorite fails, so one loss erases ~19 wins. Wait for the event count before "
                    "trusting any number.")
