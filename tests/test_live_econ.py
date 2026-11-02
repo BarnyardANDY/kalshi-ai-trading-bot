@@ -212,3 +212,24 @@ def test_every_scan_is_logged_for_the_dashboard(paths):
     asyncio.run(L.scan(Client([econ()]), NOW, db, arm_path=arm))
     log = L.report(db, arm)["log"]
     assert any("scan (shadow): 1 new Economics favorites qualified" in m for m in log["msg"])
+
+
+def test_only_one_live_process_can_run(tmp_path):
+    lp = str(tmp_path / "live.lock")
+    first = L.acquire_single_instance(lp)
+    assert first is not None
+    assert L.acquire_single_instance(lp) is None            # a second copy is refused
+    first.close()
+    again = L.acquire_single_instance(lp)                   # free once the first one stops
+    assert again is not None
+    again.close()
+
+
+def test_second_copy_exits_without_trading(tmp_path, monkeypatch):
+    lp, db = str(tmp_path / "live.lock"), str(tmp_path / "live.db")
+    held = L.acquire_single_instance(lp)
+    import src.clients.kalshi_client as kc
+    monkeypatch.setattr(kc, "KalshiClient", lambda: (_ for _ in ()).throw(AssertionError("must not start")))
+    asyncio.run(L.run_forever(None, db, str(tmp_path / "arm.json"), lock_path=lp))
+    assert any("already running" in m for m in L.report(db, str(tmp_path / "arm.json"))["log"]["msg"])
+    held.close()

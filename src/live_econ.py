@@ -374,9 +374,38 @@ async def settle(client, now: float, path: Optional[str] = None, logger=None) ->
     return n
 
 
-async def run_forever(logger=None, path: Optional[str] = None, arm_path: Optional[str] = None) -> None:
+LOCK_PATH = os.getenv("LIVE_LOCK", "data/live_econ.lock")
+
+
+def acquire_single_instance(lock_path: Optional[str] = None):
+    """Only one live process may run: two at once could both buy the same market before either records it.
+    Returns the open lock file (keep it open for the life of the process), or None if another copy holds it."""
+    import fcntl
+    p = lock_path or LOCK_PATH
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    f = open(p, "a+")
+    try:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return None
+    f.seek(0)
+    f.truncate()
+    f.write(str(os.getpid()))
+    f.flush()
+    return f
+
+
+async def run_forever(logger=None, path: Optional[str] = None, arm_path: Optional[str] = None,
+                      lock_path: Optional[str] = None) -> None:
     from src.clients.kalshi_client import KalshiClient
     from src.config.settings import settings
+    lock = acquire_single_instance(lock_path)
+    if lock is None:
+        note(path, "warn", "another live process is already running: this copy did NOT start", logger)
+        return
     settings.trading.live_trading_enabled = False          # off for this whole process except inside place()
     client = KalshiClient()
     last_scan = last_settle = 0.0
@@ -404,6 +433,7 @@ async def run_forever(logger=None, path: Optional[str] = None, arm_path: Optiona
             await asyncio.sleep(20)
     finally:
         await client.close()
+        lock.close()
 
 
 # ----------------------------------------------------------------------------
