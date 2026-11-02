@@ -300,10 +300,13 @@ async def scan(client, now: float, path: Optional[str] = None, logger=None, arm_
                     _insert(path, row)
                     break
         _insert(path, row)
+    msg = (f"scan ({stats['mode']}): {stats['candidates']} new Economics favorites qualified; "
+           + (f"{stats['ordered']} real orders placed" if stats["mode"] == "live" else "recorded as shadow bets")
+           + (f"; {stats['skipped_cap']} skipped (cap reached)" if stats["skipped_cap"] else "")
+           + (f"; {stats['skipped_book']} skipped (price not really in the book)" if stats["skipped_book"] else ""))
+    note(path, "info", msg)                    # shows under 'Recent events' on the dashboard
     if logger:
-        logger.info(f"LIVE scan ({stats['mode']}): {stats['candidates']} Economics favorites qualify; "
-                    f"{stats['ordered']} real orders; skipped {stats['skipped_cap']} for the cap, "
-                    f"{stats['skipped_book']} where the book didn't have our price")
+        logger.info(f"LIVE {msg}")
     return stats
 
 
@@ -378,10 +381,17 @@ async def run_forever(logger=None, path: Optional[str] = None, arm_path: Optiona
     client = KalshiClient()
     last_scan = last_settle = 0.0
     note(path, "info", f"started in {'LIVE (armed)' if read_arm(arm_path)['armed'] else 'SHADOW'} mode", logger)
+    was_armed = read_arm(arm_path)["armed"]
     try:
         while True:
             t0 = time.time()
             try:
+                a = read_arm(arm_path)
+                if a["armed"] != was_armed:            # record every switch between live and shadow
+                    was_armed = a["armed"]
+                    note(path, "warn" if not a["armed"] else "info",
+                         f"now LIVE: armed, cap ${a['cap']:,.0f}, {a['contracts']} per bet" if a["armed"]
+                         else f"now SHADOW: disarmed ({a.get('reason') or 'no reason given'})", logger)
                 if t0 - last_scan > SCAN_SECONDS:
                     last_scan = t0
                     await scan(client, t0, path, logger, arm_path)

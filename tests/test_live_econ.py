@@ -205,3 +205,10 @@ def test_report_and_mode(paths):
 def test_never_sells():
     src = open(L.__file__).read()
     assert 'action="sell"' not in src and "action='sell'" not in src
+
+
+def test_every_scan_is_logged_for_the_dashboard(paths):
+    db, arm = paths
+    asyncio.run(L.scan(Client([econ()]), NOW, db, arm_path=arm))
+    log = L.report(db, arm)["log"]
+    assert any("scan (shadow): 1 new Economics favorites qualified" in m for m in log["msg"])

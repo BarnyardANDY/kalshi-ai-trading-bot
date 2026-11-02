@@ -127,13 +127,13 @@ with h2:
 s1, s2, s3, s4 = st.columns(4)
 mins = status["minutes_ago"]
 if mins is None:
-    s1.metric("Bot", "no log found")
+    s1.metric("Old AI bot", "no log found")
 elif mins < 30:  # a full scan of every niche can take ~20 minutes
-    s1.metric("Bot", "● running", f"active {mins:.0f} min ago", delta_color="off")
+    s1.metric("Old AI bot", "● running", f"active {mins:.0f} min ago", delta_color="off")
 elif status.get("session_running") is False:
-    s1.metric("Bot", "○ off", f"stopped; last ran {mins / 60:.0f}h ago", delta_color="off")
+    s1.metric("Old AI bot", "○ off", f"stopped; last ran {mins / 60:.0f}h ago", delta_color="off")
 else:
-    s1.metric("Bot", "⚠ stalled?", f"last activity {mins:.0f} min ago", delta_color="off")
+    s1.metric("Old AI bot", "⚠ stalled?", f"last activity {mins:.0f} min ago", delta_color="off")
 from src import live_econ as LE  # noqa: E402
 _arm = LE.read_arm()
 s2.metric("Live test", "● LIVE $" if _arm["armed"] else "SHADOW",
@@ -492,8 +492,8 @@ with tab_live:
     lr = _live()
     a_ = lr["arm"]
     if a_["armed"]:
-        st.error(f"● LIVE: real orders are ON. Cap ${a_['cap']:,.0f} in open positions, {a_['contracts']} contracts "
-                 f"per bet, stops for the day after ${a_['daily_loss_stop']:,.0f} of losses. "
+        st.error(f"● LIVE: real orders are ON. Cap \\${a_['cap']:,.0f} in open positions, {a_['contracts']} contracts "
+                 f"per bet, stops for the day after \\${a_['daily_loss_stop']:,.0f} of losses. "
                  "To stop: python cli.py live-econ --disarm")
     else:
         st.info("SHADOW: it decides exactly what it would buy and records it, but sends NO orders. "
