@@ -1594,6 +1594,86 @@ def cmd_gap_study(args: argparse.Namespace) -> None:
         print("\nGap study stopped.")
 
 
+def cmd_live_econ(args: argparse.Namespace) -> None:
+    """Live test of the Economics-favorites rule: shadow by default, real orders only when armed."""
+    from src import live_econ as LE
+
+    if args.disarm:
+        LE.write_arm(False, reason="disarmed by user")
+        print("DISARMED. No new real orders from the next check (within a minute). Positions already open stay "
+              "open until their markets settle.")
+        return
+    if args.arm:
+        cap, contracts, stop = float(args.cap), int(args.contracts), float(args.daily_stop)
+        print("=" * 70)
+        print("  ARM THE LIVE TEST: real money on Kalshi")
+        print("=" * 70)
+        print("  Rule: buy the favorite side of ECONOMICS markets closing in 6-24 hours at 90-98c, only at a")
+        print("        price really in the order book, one bet per market, held until the market settles.")
+        print(f"  Limits: at most ${cap:,.0f} in open positions at once; {contracts} contracts per bet;")
+        print(f"          no new bets on a day once settled losses reach ${stop:,.0f}; buys only, never sells.")
+        print("  Stop any time:  python cli.py live-econ --disarm")
+        if not 0 < cap <= LE.CAP_MAX or not LE.CONTRACTS_MIN <= contracts <= LE.CONTRACTS_MAX or stop <= 0:
+            print(f"  Refused: cap must be $1-${LE.CAP_MAX:.0f}, contracts {LE.CONTRACTS_MIN}-{LE.CONTRACTS_MAX}, "
+                  "daily stop above $0. Nothing changed.")
+            return
+        typed = input(f"\n  To confirm, type exactly:  ARM {cap:.0f}\n  > ").strip()
+        if typed != f"ARM {cap:.0f}":
+            print("  Not armed (that didn't match). Nothing changed.")
+            return
+        LE.write_arm(True, cap=cap, contracts=contracts, daily_loss_stop=stop, reason="armed by user")
+        print(f"  ARMED: real orders start from the next scan (within 10 minutes), up to ${cap:,.0f} at risk.")
+        return
+    if args.status:
+        rep = LE.report()
+        a = rep["arm"]
+        print(f"  Mode: {'LIVE (armed)' if a['armed'] else 'SHADOW (no real orders)'}"
+              + (f", cap ${a['cap']:,.0f}, {a['contracts']} per bet, daily stop ${a['daily_loss_stop']:,.0f}"
+                 if a["armed"] else (f" ({a.get('reason')})" if a.get("reason") else "")))
+        for mode in ("live", "shadow"):
+            r = rep.get(mode) or {}
+            if r.get("orders"):
+                print(f"  {mode}: {r['orders']} orders, {r['filled']} filled, {r['settled']} settled "
+                      f"({r['wins']} won), P&L ${r['pnl']:+.2f}, today ${r['pnl_today']:+.2f}, "
+                      f"open at cost ${r['at_risk']:.2f}")
+        log = rep.get("log")
+        if log is not None and not log.empty:
+            print("  Recent:")
+            for _, row in log.head(5).iterrows():
+                print(f"    {row['time']:%m-%d %H:%M} {row['msg']}")
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("live_econ")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/live_econ.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    a = LE.read_arm()
+    print(f"Live test running in {'LIVE (armed, real money)' if a['armed'] else 'SHADOW (no real orders)'} mode. "
+          "Ctrl+C to stop the process; 'python cli.py live-econ --disarm' stops real orders without stopping it.")
+    if args.once:
+        async def one():
+            from src.clients.kalshi_client import KalshiClient
+            from src.config.settings import settings
+            settings.trading.live_trading_enabled = False
+            c = KalshiClient()
+            try:
+                print(await LE.scan(c, time.time(), logger=logger))
+            finally:
+                await c.close()
+        asyncio.run(one())
+        return
+    try:
+        asyncio.run(LE.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nLive test process stopped.")
+
+
 def cmd_poly_check(args: argparse.Namespace) -> None:
     """Polymarket price-check study (measurement only, never trades). See src/poly_check.py."""
     from src import poly_check as PC
@@ -2362,6 +2442,17 @@ def build_parser() -> argparse.ArgumentParser:
         "favorites", help="Paper test: buy 90-98c favorites 6-24h before close (never trades)")
     p_fav.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_fav.set_defaults(func=cmd_favorites)
+
+    p_le = subparsers.add_parser(
+        "live-econ", help="Live test of the Economics-favorites rule (shadow unless armed; $100 cap by default)")
+    p_le.add_argument("--arm", action="store_true", help="Allow real orders (asks you to type the cap to confirm)")
+    p_le.add_argument("--disarm", action="store_true", help="Stop real orders (back to shadow)")
+    p_le.add_argument("--status", action="store_true", help="Show mode, P&L and recent events, then exit")
+    p_le.add_argument("--once", action="store_true", help="Run one scan and exit")
+    p_le.add_argument("--cap", type=float, default=100.0, help="Most money in open positions at once (max 250)")
+    p_le.add_argument("--contracts", type=int, default=3, help="Contracts per bet (3-5)")
+    p_le.add_argument("--daily-stop", type=float, default=15.0, help="Stop new bets for the day after this much loss")
+    p_le.set_defaults(func=cmd_live_econ)
 
     p_pc = subparsers.add_parser(
         "poly-check", help="Study: is Polymarket's price a better guide than Kalshi's for the same games? (never trades)")

@@ -134,14 +134,17 @@ elif status.get("session_running") is False:
     s1.metric("Bot", "○ off", f"stopped; last ran {mins / 60:.0f}h ago", delta_color="off")
 else:
     s1.metric("Bot", "⚠ stalled?", f"last activity {mins:.0f} min ago", delta_color="off")
-s2.metric("Mode", {"paper": "PAPER", "LIVE": "LIVE $"}.get(status["mode"], "unknown"))
+from src import live_econ as LE  # noqa: E402
+_arm = LE.read_arm()
+s2.metric("Live test", "● LIVE $" if _arm["armed"] else "SHADOW",
+          f"armed, cap ${_arm['cap']:,.0f}" if _arm["armed"] else "no real orders", delta_color="off")
 s3.metric("New trades", "PAUSED" if cfg["PAUSED"] else "ON")
 ai = data["ai"]
 cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
 # Live tests first; finished ones live in the Archive tab (their numbers stay, frozen).
-tab_fav, tab_ctrl, tab_arch = st.tabs(["Favorites test", "Strategy controls", "Archive"])
+tab_live, tab_fav, tab_ctrl, tab_arch = st.tabs(["Live test", "Favorites test", "Strategy controls", "Archive"])
 with tab_arch:
     st.caption("Finished tests, kept for the record. None of these found an edge you could trade; their "
                "processes are stopped and their numbers are frozen at the end.")
@@ -476,6 +479,68 @@ with tab_maker:
                      column_config={"price": st.column_config.NumberColumn(format="%.2f"),
                                     "queue_ahead": st.column_config.NumberColumn("queue ahead", format="%.0f"),
                                     "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+
+# ----------------------------------------------------------------------------
+# Live test (Economics favorites, real money only when armed)
+# ----------------------------------------------------------------------------
+@st.cache_data(ttl=30, max_entries=1)
+def _live():
+    return LE.report()
+
+
+with tab_live:
+    lr = _live()
+    a_ = lr["arm"]
+    if a_["armed"]:
+        st.error(f"● LIVE: real orders are ON. Cap ${a_['cap']:,.0f} in open positions, {a_['contracts']} contracts "
+                 f"per bet, stops for the day after ${a_['daily_loss_stop']:,.0f} of losses. "
+                 "To stop: python cli.py live-econ --disarm")
+    else:
+        st.info("SHADOW: it decides exactly what it would buy and records it, but sends NO orders. "
+                + (f"({a_['reason']}) " if a_.get("reason") else "")
+                + "To allow real orders: python cli.py live-econ --arm")
+    st.caption("Rule: the paper 'Economics favorites only' arm exactly: favorite side of Economics markets closing "
+               "in 6-24 hours at 90-98c, bought only at a price really in Kalshi's order book (immediate-or-cancel, "
+               "nothing left resting), one bet per market, held to settlement. Runs as tmux session 'live'.")
+    for mode, title in (("live", "Real money"), ("shadow", "Shadow (what it would have done)")):
+        r_ = lr.get(mode) or {}
+        if not r_.get("orders"):
+            continue
+        st.markdown(f"#### {title}")
+        a, b, cc, d, e = st.columns(5)
+        a.metric("Bets", f"{r_['filled']:,}", f"{r_['orders']:,} orders", delta_color="off")
+        b.metric("Settled", f"{r_['settled']:,}", f"{r_['wins']} won", delta_color="off")
+        cc.metric("P&L", money(r_["pnl"]), f"today {money(r_['pnl_today'])}", delta_color="off")
+        d.metric("¢ / contract", f"{r_['c_per_contract']:+.2f}¢" if r_.get("c_per_contract") is not None else "–")
+        e.metric("Open, at cost", money(r_["at_risk"]).replace("+", ""), delta_color="off")
+    vp = lr.get("vs_paper") or {}
+    if vp.get("matched"):
+        st.markdown("#### Live vs. paper on the same markets")
+        st.caption("The point of the live test: does real money pay the same price and earn the same as paper?")
+        a, b, cc = st.columns(3)
+        a.metric("Markets in both", vp["matched"])
+        b.metric("Real price vs paper (median)", f"{vp['median_price_diff_c']:+.1f}¢")
+        if vp.get("live_pnl_per_contract_c") is not None and vp.get("paper_pnl_per_contract_c") is not None:
+            cc.metric("¢/contract: live vs paper", f"{vp['live_pnl_per_contract_c']:+.2f} vs "
+                      f"{vp['paper_pnl_per_contract_c']:+.2f}")
+    od_ = lr["orders"]
+    if not od_.empty:
+        st.markdown("#### Orders")
+        st.dataframe(od_[["time", "mode", "status", "ticker", "title", "side", "limit_price", "count_req", "fill_count",
+                          "avg_price", "cost", "result", "pnl", "error"]].head(200), hide_index=True,
+                     use_container_width=True,
+                     column_config={"limit_price": st.column_config.NumberColumn("price", format="%.2f"),
+                                    "avg_price": st.column_config.NumberColumn("paid", format="%.3f"),
+                                    "count_req": st.column_config.NumberColumn("asked"),
+                                    "fill_count": st.column_config.NumberColumn("filled", format="%.0f"),
+                                    "cost": st.column_config.NumberColumn(format="dollar"),
+                                    "pnl": st.column_config.NumberColumn("P&L", format="dollar")})
+    else:
+        st.info("No orders yet. On the server: tmux session 'live' running `python cli.py live-econ`.")
+    lg_ = lr.get("log")
+    if lg_ is not None and not lg_.empty:
+        st.markdown("#### Recent events")
+        st.dataframe(lg_[["time", "level", "msg"]], hide_index=True, use_container_width=True)
 
 # ----------------------------------------------------------------------------
 # Favorites paper test (separate study)

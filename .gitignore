@@ -241,3 +241,5 @@ data/*.json.tmp
 data/favorites.db
 data/poly_check.db
 data/poly_report.json
+data/live_econ.db
+data/live_arm.json
