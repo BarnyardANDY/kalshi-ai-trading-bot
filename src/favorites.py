@@ -53,7 +53,8 @@ SCAN_SECONDS = 600
 EXCLUDE_PREFIXES = ("KXMVE",)
 ARMS = {"favorites": "All favorites (90-98c, 6-24h)", "whale": "Only after a whale bought the favorite",
         "fav_93_95": "93-95c favorites only (6-24h)", "fav_1_6h": "Favorites 1-6h before close (90-98c)",
-        "fav_econ": "Economics favorites only (90-98c, 6-24h)"}
+        "fav_econ": "Economics favorites only (90-98c, 6-24h)",
+        "fav_econ_2": "Economics favorites, max 2 per event (90-98c, 6-24h)"}
 # each scanned arm's own rules (the whale arm uses the 'favorites' rules plus its whale trigger)
 ARM_RULES = {
     "favorites": {"min_price": RULES["min_price"], "max_price": RULES["max_price"],
@@ -64,12 +65,17 @@ ARM_RULES = {
     # added Oct 29 from the stress test (Economics carried two-thirds of the profit), fresh data only:
     "fav_econ": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0,
                  "category": "Economics"},
+    # added Nov 3 after the first live day (three bets on one Oklahoma gas number lost together): the same
+    # rule, but at most 2 bets per event (one state's gas price for one day), the first two the scan finds.
+    # Mirrors the live bot's limit so we can see whether the limit helps or just trims profit.
+    "fav_econ_2": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0,
+                   "category": "Economics", "max_per_event": 2},
 }
-NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ")
+NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ", "fav_econ_2")
 # shown first on the dashboard; the rest still collect (paper costs nothing) but sit in a collapsed section
-MAIN_ARMS = ("favorites", "fav_93_95", "fav_econ")
+MAIN_ARMS = ("favorites", "fav_93_95", "fav_econ", "fav_econ_2")
 ARM_ADDED_BECAUSE = {"fav_93_95": "the one-week check-in", "fav_1_6h": "the one-week check-in",
-                     "fav_econ": "the stress test"}
+                     "fav_econ": "the stress test", "fav_econ_2": "the first live day (Nov 3)"}
 
 
 # ----------------------------------------------------------------------------
@@ -178,6 +184,12 @@ def _known(path: Optional[str], arm: str) -> set:
         return {r[0] for r in c.execute("SELECT ticker FROM bets WHERE arm=?", (arm,))}
 
 
+def _event_counts(path: Optional[str], arm: str) -> Dict[str, int]:
+    with closing(_conn(path)) as c:
+        return dict(c.execute("SELECT event, COUNT(*) FROM bets WHERE arm=? AND event IS NOT NULL GROUP BY event",
+                              (arm,)).fetchall())
+
+
 def record(path: Optional[str], arm: str, m: Dict[str, Any], fav: Dict[str, Any], now: float,
            depth: Optional[float] = None, whale: Optional[Dict[str, Any]] = None,
            book_ask: Optional[float] = None) -> bool:
@@ -260,6 +272,7 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
                          markets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     markets = markets if markets is not None else await fetch_window(client, now)
     known = {arm: _known(path, arm) for arm in ARM_RULES}
+    per_event = {arm: _event_counts(path, arm) for arm, r in ARM_RULES.items() if r.get("max_per_event")}
     qualifying = new = 0
     new_by_arm = {arm: 0 for arm in ARM_RULES}
     depth_cache: Dict[tuple, Optional[float]] = {}
@@ -281,6 +294,8 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
                 qualifying += 1
             if m["ticker"] in known[arm]:
                 continue
+            if arm in per_event and per_event[arm].get(m.get("event_ticker"), 0) >= rules["max_per_event"]:
+                continue
             key = (m["ticker"], fav["side"], fav["price"])
             if key not in depth_cache:
                 depth_cache[key] = (None, None)
@@ -290,6 +305,9 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
             depth, real_ask = depth_cache[key]
             if record(path, arm, m, fav, now, depth, book_ask=real_ask):
                 new_by_arm[arm] += 1
+                if arm in per_event:
+                    ev = m.get("event_ticker")
+                    per_event[arm][ev] = per_event[arm].get(ev, 0) + 1
                 if arm == "favorites":
                     new += 1
     with closing(_conn(path)) as c:

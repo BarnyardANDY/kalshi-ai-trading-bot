@@ -501,7 +501,8 @@ with tab_live:
                 + "To allow real orders: python cli.py live-econ --arm")
     st.caption("Rule: the paper 'Economics favorites only' arm exactly: favorite side of Economics markets closing "
                "in 6-24 hours at 90-98c, bought only at a price really in Kalshi's order book (immediate-or-cancel, "
-               "nothing left resting), one bet per market, held to settlement. Runs as tmux session 'live'.")
+               "nothing left resting), one bet per market and at most 2 per event (one state's gas price for one day), "
+               "held to settlement. Runs as tmux session 'live'.")
     for mode, title in (("live", "Real money"), ("shadow", "Shadow (what it would have done)")):
         r_ = lr.get(mode) or {}
         if not r_.get("orders"):
@@ -604,7 +605,7 @@ with tab_fav:
         if not done.empty:
             st.markdown("#### Equity (per contract, settled bets)")
             fig = go.Figure()
-            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c")):
+            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6")):
                 g = done[done["arm"] == arm]
                 if not g.empty:
                     fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=F.ARMS[arm],
@@ -637,7 +638,7 @@ with tab_fav:
                 pick_b = st.radio("Show value over time for", list(F.BANKROLLS), horizontal=True,
                                   format_func=lambda b: f"${b:,}", key="fav_bankroll")
                 fig = go.Figure()
-                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c")):
+                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6")):
                     cv = (bk.get(arm) or {}).get(pick_b, {}).get("curve") or []
                     if cv:
                         xs = pd.to_datetime([t for t, _ in cv], unit="s", utc=True).tz_convert("America/New_York").tz_localize(None)

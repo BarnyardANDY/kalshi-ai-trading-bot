@@ -68,7 +68,8 @@ def test_scan_records_once_then_settles(tmp_path):
     r = asyncio.run(F.scan_favorites(c, NOW, db))
     assert (r["markets"], r["qualifying"], r["new"]) == (4, 2, 2)
     # E1-A (95c, 12h) also fits the 93-95c arm; E4-D (95c, 2h) fits only the 1-6h arm
-    assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1, "fav_econ": 0}   # Fake says "Sports"
+    assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1, "fav_econ": 0,
+                                "fav_econ_2": 0}   # Fake says "Sports"
     assert asyncio.run(F.scan_favorites(c, NOW + 600, db))["new"] == 0          # one bet per market
     df = F.rows(db)
     df = df[df["arm"] == "favorites"]
@@ -299,3 +300,26 @@ def test_real_price_check_separates_bets_that_were_really_buyable():
     assert rp["only_really_there"]["bets"] == there
     assert rp["with_real_price"] == 20 and rp["median_real_minus_ours_c"] == pytest.approx(2.0)
     assert F.stress(df)["real_price"]["checked"] == checked
+
+
+def test_econ_max_2_arm_takes_at_most_two_bets_per_event(tmp_path):
+    db = str(tmp_path / "f.db")
+
+    class EconFake(Fake):
+        async def _make_authenticated_request(self, method, endpoint, params=None, require_auth=True):
+            if endpoint.endswith("/markets"):
+                return {"markets": list(self.markets.values())}
+            return {"series": {"category": "Economics"}}
+
+    ut = [mk(f"KXAAAGASDUT-26NOV04-4.5{i}0", .94, .95) for i in range(5)]       # 5 thresholds, one Utah number
+    ok = [mk(f"KXAAAGASDOK-26NOV04-3.8{i}0", .94, .95) for i in range(1)]
+    c = EconFake(ut[:3] + ok)
+    r = asyncio.run(F.scan_favorites(c, NOW, db))
+    assert r["new_by_arm"]["fav_econ"] == 4 and r["new_by_arm"]["fav_econ_2"] == 3      # 2 Utah + 1 Oklahoma
+    c.markets.update({m["ticker"]: m for m in ut[3:]})
+    r = asyncio.run(F.scan_favorites(c, NOW + 600, db))
+    assert r["new_by_arm"]["fav_econ"] == 2 and r["new_by_arm"]["fav_econ_2"] == 0      # Utah already has 2
+    df = F.rows(db)
+    two = df[df["arm"] == "fav_econ_2"]
+    assert two.groupby("event").size().max() == 2
+    assert "fav_econ_2" in F.NEW_ARMS and "fav_econ_2" in F.MAIN_ARMS

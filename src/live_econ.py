@@ -3,7 +3,9 @@ Live test of the Economics-favorites rule, with real money, small and fenced in.
 
 Rules: exactly the paper 'Economics favorites only' arm (src/favorites.py, ARM_RULES['fav_econ']):
 the favorite side of an Economics market closing in 6-24 hours, priced 90-98c, a real bid within
-4c, one bet per market, held to settlement. Separate process (``cli.py live-econ``, tmux 'live'),
+4c, one bet per market and at most MAX_PER_EVENT (2) per event -- one state's gas price for one day --
+so a single number can't sink many bets at once (added Nov 3; the paper arm 'fav_econ_2' mirrors it), held to
+settlement. Separate process (``cli.py live-econ``, tmux 'live'),
 own database (``data/live_econ.db``), own dashboard tab.
 
 SAFETY (the bot once placed real trades nobody asked for; none of that can happen here):
@@ -42,6 +44,7 @@ SCAN_SECONDS = 600
 CAP_MAX = 250.0                 # the code refuses any cap above this
 CONTRACTS_MIN, CONTRACTS_MAX = 3, 5
 MAX_ORDERS_PER_SCAN = 10
+MAX_PER_EVENT = 2          # bets per event (e.g. Utah gas for Nov 4); added after day 1's Oklahoma cluster
 MAX_ERRORS_IN_A_ROW = 3
 DEFAULTS = {"cap": 100.0, "contracts": 3, "daily_loss_stop": 15.0}
 
@@ -49,6 +52,29 @@ DEFAULTS = {"cap": 100.0, "contracts": 3, "daily_loss_stop": 15.0}
 def rules() -> Dict[str, Any]:
     from src.favorites import ARM_RULES
     return dict(ARM_RULES["fav_econ"])
+
+
+def event_counts(path: Optional[str] = None) -> Dict[str, int]:
+    """Bets already held per event (anything that bought at least one contract, live or shadow)."""
+    with closing(_conn(path)) as c:
+        return dict(c.execute("SELECT event, COUNT(*) FROM orders WHERE event IS NOT NULL AND fill_count > 0 "
+                              "GROUP BY event").fetchall())
+
+
+def limit_per_event(cands: List[Tuple[Dict[str, Any], Dict[str, Any]]], held: Dict[str, int],
+                    max_per_event: int = MAX_PER_EVENT) -> Tuple[List[Tuple[Dict[str, Any], Dict[str, Any]]], int]:
+    """Keep the first candidates of each event until it has ``max_per_event`` bets; (kept, number held back)."""
+    seen = dict(held)
+    kept, back = [], 0
+    for m, fav in cands:
+        ev = m.get("event_ticker")
+        if ev and seen.get(ev, 0) >= max_per_event:
+            back += 1
+            continue
+        if ev:
+            seen[ev] = seen.get(ev, 0) + 1
+        kept.append((m, fav))
+    return kept, back
 
 
 # ----------------------------------------------------------------------------
@@ -238,13 +264,15 @@ async def scan(client, now: float, path: Optional[str] = None, logger=None, arm_
     from src.arb_scan import depth_at_ask
     arm = read_arm(arm_path)
     mode = "live" if arm["armed"] else "shadow"
-    stats = {"mode": mode, "candidates": 0, "ordered": 0, "skipped_cap": 0, "skipped_book": 0, "stopped": None}
+    stats = {"mode": mode, "candidates": 0, "ordered": 0, "skipped_cap": 0, "skipped_book": 0,
+             "held_event": 0, "stopped": None}
     if mode == "live" and settled_pnl_today(path, now) <= -arm["daily_loss_stop"]:
         stats["stopped"] = f"daily loss stop reached ({settled_pnl_today(path, now):+.2f} today)"
         note(path, "warn", stats["stopped"] + ": no new orders until tomorrow", logger)
         return stats
     cands = await candidates(client, now, path, markets)
     stats["candidates"] = len(cands)
+    cands, stats["held_event"] = limit_per_event(cands, event_counts(path))
     errors_in_a_row = 0
     for m, fav in cands[:MAX_ORDERS_PER_SCAN]:
         try:
@@ -303,6 +331,8 @@ async def scan(client, now: float, path: Optional[str] = None, logger=None, arm_
     msg = (f"scan ({stats['mode']}): {stats['candidates']} new Economics favorites qualified; "
            + (f"{stats['ordered']} real orders placed" if stats["mode"] == "live" else "recorded as shadow bets")
            + (f"; {stats['skipped_cap']} skipped (cap reached)" if stats["skipped_cap"] else "")
+           + (f"; {stats['held_event']} held back (already {MAX_PER_EVENT} bets on that state/day)"
+              if stats["held_event"] else "")
            + (f"; {stats['skipped_book']} skipped (price not really in the book)" if stats["skipped_book"] else ""))
     note(path, "info", msg)                    # shows under 'Recent events' on the dashboard
     if logger:

@@ -118,7 +118,7 @@ def test_buys_only_at_the_price_seen_and_really_in_the_book(paths):
 def test_cap_limits_money_at_risk(paths):
     db, arm = paths
     L.write_arm(True, cap=5, contracts=3, path=arm)       # one 3-contract bet at 95c costs ~$2.86
-    c = Client([econ(), mk("KXAAAGASD-26NOV03-4.40", .94, .95), mk("KXAAAGASD-26NOV03-4.50", .94, .95)])
+    c = Client([econ(), mk("KXAAAGASD-26NOV04-4.40", .94, .95), mk("KXAAAGASD-26NOV05-4.50", .94, .95)])
     st = asyncio.run(L.scan(c, NOW, db, arm_path=arm))
     assert st["ordered"] == 1 and st["skipped_cap"] == 2
     assert L.money_at_risk(db) <= 5
@@ -137,7 +137,7 @@ def test_daily_loss_stop(paths):
 def test_three_errors_in_a_row_disarm(paths):
     db, arm = paths
     L.write_arm(True, cap=100, path=arm)
-    c = Client([mk(f"KXAAAGASD-26NOV03-4.{i}0", .94, .95) for i in range(5)], fail=True)
+    c = Client([mk(f"KXAAAGASD-26NOV1{i}-4.30", .94, .95) for i in range(5)], fail=True)     # 5 different events
     asyncio.run(L.scan(c, NOW, db, arm_path=arm))
     assert len(c.placed) == 3 and L.read_arm(arm)["armed"] is False
     assert "auto-disarmed" in L.read_arm(arm)["reason"]
@@ -233,3 +233,28 @@ def test_second_copy_exits_without_trading(tmp_path, monkeypatch):
     asyncio.run(L.run_forever(None, db, str(tmp_path / "arm.json"), lock_path=lp))
     assert any("already running" in m for m in L.report(db, str(tmp_path / "arm.json"))["log"]["msg"])
     held.close()
+
+
+def test_at_most_two_bets_per_event(paths):
+    db, arm = paths
+    L.write_arm(True, cap=100, contracts=3, path=arm)
+    ut = [mk(f"KXAAAGASD-26NOV04-4.5{i}0", .94, .95) for i in range(5)]           # 5 thresholds, one number
+    other = mk("KXAAAGASD-26NOV05-4.30", .94, .95)                                  # a different event
+    c = Client(ut + [other])
+    st = asyncio.run(L.scan(c, NOW, db, arm_path=arm))
+    assert st["ordered"] == 3 and st["held_event"] == 3
+    by_event = {}
+    for o in L.orders(db):
+        by_event[o["event"]] = by_event.get(o["event"], 0) + 1
+    assert by_event == {"KXAAAGASD-26NOV04": 2, "KXAAAGASD-26NOV05": 1}
+    st = asyncio.run(L.scan(c, NOW + 600, db, arm_path=arm))                        # next scan: still full
+    assert st["ordered"] == 0 and st["held_event"] == 3
+    assert any("held back (already 2 bets" in m for m in L.report(db, arm)["log"]["msg"])
+
+
+def test_limit_per_event_ignores_failed_buys():
+    cands = [({"ticker": f"T{i}", "event_ticker": "EV"}, {}) for i in range(4)]
+    kept, back = L.limit_per_event(cands, {"EV": 1})
+    assert [m["ticker"] for m, _ in kept] == ["T0"] and back == 3
+    kept, back = L.limit_per_event(cands, {})
+    assert len(kept) == 2 and back == 2
