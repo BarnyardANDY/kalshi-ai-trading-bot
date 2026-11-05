@@ -68,15 +68,18 @@ def test_scan_records_once_then_settles(tmp_path):
     r = asyncio.run(F.scan_favorites(c, NOW, db))
     assert (r["markets"], r["qualifying"], r["new"]) == (4, 2, 2)
     # E1-A (95c, 12h) also fits the 93-95c arm; E4-D (95c, 2h) fits only the 1-6h arm
+    r["new_by_arm"].pop("fav_cal")                          # depends on today's date vs. the events calendar
     assert r["new_by_arm"] == {"favorites": 2, "fav_93_95": 1, "fav_1_6h": 1, "fav_econ": 0,
-                                "fav_econ_2": 0}   # Fake says "Sports"
+                                "fav_econ_2": 0, "fav_steady": 2}   # Fake says "Sports"; no price history yet
     assert asyncio.run(F.scan_favorites(c, NOW + 600, db))["new"] == 0          # one bet per market
     df = F.rows(db)
     df = df[df["arm"] == "favorites"]
     assert set(df["side"]) == {"yes", "no"} and df.loc[df["side"] == "yes", "depth"].iloc[0] == 120
     c.markets["E1-A"]["result"] = "yes"                                          # favorite wins
     c.markets["E2-B"]["result"] = "yes"                                          # favorite (NO) loses
-    assert asyncio.run(F.settle(c, NOW + 90000, db)) == 3                        # E1-A in two arms + E2-B
+    held = F.rows(db)
+    expect = int(held["ticker"].isin(["E1-A", "E2-B"]).sum())                   # every arm holding either market
+    assert expect >= 3 and asyncio.run(F.settle(c, NOW + 90000, db)) == expect
     df = F.rows(db)
     df = df[df["arm"] == "favorites"].set_index("ticker")
     assert df.loc["E1-A", "pnl"] == pytest.approx(F.pnl_per_contract(0.95, True))
@@ -323,3 +326,52 @@ def test_econ_max_2_arm_takes_at_most_two_bets_per_event(tmp_path):
     two = df[df["arm"] == "fav_econ_2"]
     assert two.groupby("event").size().max() == 2
     assert "fav_econ_2" in F.NEW_ARMS and "fav_econ_2" in F.MAIN_ARMS
+
+
+def test_event_calendar_flags_bets_open_during_big_events():
+    from src.event_calendar import event_during, _ts
+    jobs = _ts("2026-11-06 08:30")
+    assert event_during(jobs - 20 * 3600, jobs - 2 * 3600) == "Jobs report (Oct)"      # settles on next-morning data
+    assert event_during(jobs - 40 * 3600, jobs - 30 * 3600) is None                     # closed well before
+    assert event_during(jobs + 3600, jobs + 20 * 3600) is None                          # bought after it
+    assert event_during(_ts("2026-11-03 20:00"), _ts("2026-11-04 09:00")) == "US midterm elections"
+    assert event_during(_ts("2026-11-04 20:00"), None) is None
+
+
+def test_price_memory_measures_a_fall_against_the_favorite():
+    pm = F.PriceMemory(hours=6)
+    t0 = NOW - 5 * 3600
+    for i, (b, a) in enumerate([(.96, .97), (.95, .96), (.92, .93)]):
+        pm.update([mk("P-1", b, a)], t0 + i * 3600)
+    assert pm.drop("P-1", "yes", t0 + 2 * 3600) == pytest.approx(0.04)
+    assert pm.drop("P-1", "no", t0 + 2 * 3600) == pytest.approx(0.0)
+    assert pm.drop("P-2", "yes", NOW) is None                                          # no history: no skip
+    pm.update([mk("P-3", .45, .55)], NOW)
+    assert "P-3" not in pm.h                                                            # coin flips aren't tracked
+    pm.update([], NOW + 7 * 3600)
+    assert pm.h == {}                                                                   # old history is dropped
+
+
+def test_filter_arms_skip_what_they_should_and_nothing_else(tmp_path):
+    from src.event_calendar import _ts
+    db = str(tmp_path / "f.db")
+    now = _ts("2026-11-05 12:00")
+    pm = F.PriceMemory()
+
+    def at(t, b, a, hours):
+        d = mk(t, b, a)
+        d["close_time"] = iso(now + hours * 3600)
+        return d
+    calm = at("C-1", .94, .95, 8)                  # closes 8pm Nov 5: +12h is 8am Nov 6, before the 8:30 jobs report
+    jobs = at("J-1", .94, .95, 20)                 # closes 8am Nov 6: the jobs report lands within 12h of the close
+    falling = at("F-1", .94, .95, 8)
+    pm.update([at("F-1", .97, .98, 10)], now - 3 * 3600)                               # was 97.5c three hours ago
+    F._mark_started(db, now - 60)
+    r = asyncio.run(F.scan_favorites(Fake([calm, jobs, falling]), now, db, prices=pm))
+    assert r["new_by_arm"]["favorites"] == 3
+    df = F.rows(db)
+    assert set(df[df["arm"] == "fav_cal"]["ticker"]) == {"C-1", "F-1"}
+    assert set(df[df["arm"] == "fav_steady"]["ticker"]) == {"C-1", "J-1"}
+    rep = F.report(db)
+    assert rep["vs_base"]["fav_cal"]["base"] == "favorites"
+    assert set(rep["calendar_lookback"]) == {"during big events", "other times"}

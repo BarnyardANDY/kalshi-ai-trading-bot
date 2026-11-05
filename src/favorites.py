@@ -54,7 +54,9 @@ EXCLUDE_PREFIXES = ("KXMVE",)
 ARMS = {"favorites": "All favorites (90-98c, 6-24h)", "whale": "Only after a whale bought the favorite",
         "fav_93_95": "93-95c favorites only (6-24h)", "fav_1_6h": "Favorites 1-6h before close (90-98c)",
         "fav_econ": "Economics favorites only (90-98c, 6-24h)",
-        "fav_econ_2": "Economics favorites, max 2 per event (90-98c, 6-24h)"}
+        "fav_econ_2": "Economics favorites, max 2 per event (90-98c, 6-24h)",
+        "fav_cal": "All favorites, sitting out big scheduled events",
+        "fav_steady": "All favorites, skipping ones whose price is falling"}
 # each scanned arm's own rules (the whale arm uses the 'favorites' rules plus its whale trigger)
 ARM_RULES = {
     "favorites": {"min_price": RULES["min_price"], "max_price": RULES["max_price"],
@@ -70,12 +72,23 @@ ARM_RULES = {
     # Mirrors the live bot's limit so we can see whether the limit helps or just trims profit.
     "fav_econ_2": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0,
                    "category": "Economics", "max_per_event": 2},
+    # added Nov 5 to test two safeguards, rules fixed before any results (judged on fresh bets only):
+    # 1) sit out any bet still open when a big scheduled event happens (election, jobs report, CPI, Fed;
+    #    the list is in src/event_calendar.py and was written from the official schedules, not from our losses)
+    "fav_cal": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0, "skip_events": True},
+    # 2) skip a favorite whose price has fallen 3c or more over the last 6 hours (confidence already leaking)
+    "fav_steady": {"min_price": 0.90, "max_price": 0.98, "min_hours": 6.0, "max_hours": 24.0,
+                   "skip_drop": 0.03, "drop_hours": 6.0},
 }
-NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ", "fav_econ_2")
+# each filter arm is the base arm's rule plus one extra skip, so it is judged against the base over the same days
+ARM_BASE = {"fav_econ_2": "fav_econ", "fav_cal": "favorites", "fav_steady": "favorites"}
+WATCH_HOURS = 30.0        # markets are watched (prices remembered) from 30h out, so a 24h-out bet has 6h of history
+NEW_ARMS = ("fav_93_95", "fav_1_6h", "fav_econ", "fav_econ_2", "fav_cal", "fav_steady")
 # shown first on the dashboard; the rest still collect (paper costs nothing) but sit in a collapsed section
-MAIN_ARMS = ("favorites", "fav_93_95", "fav_econ", "fav_econ_2")
+MAIN_ARMS = ("favorites", "fav_econ", "fav_econ_2", "fav_cal", "fav_steady")
 ARM_ADDED_BECAUSE = {"fav_93_95": "the one-week check-in", "fav_1_6h": "the one-week check-in",
-                     "fav_econ": "the stress test", "fav_econ_2": "the first live day (Nov 3)"}
+                     "fav_econ": "the stress test", "fav_econ_2": "the first live day (Nov 3)",
+                     "fav_cal": "the safeguards review (Nov 5)", "fav_steady": "the safeguards review (Nov 5)"}
 
 
 # ----------------------------------------------------------------------------
@@ -129,6 +142,60 @@ def hours_left(m: Dict[str, Any], now: float) -> Optional[float]:
     from src.whale import ts_of
     c = ts_of(m.get("close_time"))
     return (c - now) / 3600 if c else None
+
+
+class PriceMemory:
+    """Each watched market's YES mid-price over the last few hours, from our own scans (kept in memory;
+    after a restart it is blind for a few hours, which only means fewer skips)."""
+
+    def __init__(self, hours: float = 6.0):
+        self.hours = hours
+        self.h: Dict[str, List[Tuple[float, float]]] = {}
+
+    def update(self, markets: List[Dict[str, Any]], now: float) -> None:
+        cut = now - self.hours * 3600
+        for m in markets:
+            bid, ask = _f(m, "yes_bid_dollars", "yes_bid"), _f(m, "yes_ask_dollars", "yes_ask")
+            if bid <= 0 or ask <= 0:
+                continue
+            mid = (bid + ask) / 2
+            t = m["ticker"]
+            if t not in self.h and 0.30 < mid < 0.70:
+                continue                                  # only near-favorites are worth remembering
+            self.h.setdefault(t, []).append((now, mid))
+        for t in list(self.h):
+            pts = [p for p in self.h[t] if p[0] >= cut]
+            if pts:
+                self.h[t] = pts
+            else:
+                del self.h[t]
+
+    def drop(self, ticker: str, side: str, now: float, hours: Optional[float] = None) -> Optional[float]:
+        """How far the ``side`` price has fallen from its best in the last ``hours`` (None without history)."""
+        cut = now - (hours or self.hours) * 3600
+        pts = [mid for ts, mid in self.h.get(ticker, []) if ts >= cut]
+        if len(pts) < 2:
+            return None
+        return (max(pts) - pts[-1]) if side == "yes" else (pts[-1] - min(pts))
+
+
+PRICES = PriceMemory()
+
+
+def filtered_out(arm_rules: Dict[str, Any], m: Dict[str, Any], fav: Dict[str, Any], now: float,
+                 prices: Optional[PriceMemory] = None) -> Optional[str]:
+    """Why a filter arm skips this favorite (None = take it)."""
+    if arm_rules.get("skip_events"):
+        from src.event_calendar import event_during
+        from src.whale import ts_of
+        ev = event_during(now, ts_of(m.get("close_time")))
+        if ev:
+            return f"open during {ev}"
+    if arm_rules.get("skip_drop"):
+        d = (prices or PRICES).drop(m["ticker"], fav["side"], now, arm_rules.get("drop_hours"))
+        if d is not None and d >= arm_rules["skip_drop"] - 1e-9:
+            return f"price fell {d * 100:.1f}c"
+    return None
 
 
 def in_window(m: Dict[str, Any], now: float, rules: Optional[Dict[str, float]] = None) -> bool:
@@ -233,7 +300,7 @@ async def fetch_window(client, now: float, max_pages: int = 30) -> List[Dict[str
     for _ in range(max_pages):
         params = {"limit": 1000, "status": "open",
                   "min_close_ts": int(now + min(r["min_hours"] for r in ARM_RULES.values()) * 3600),
-                  "max_close_ts": int(now + max(r["max_hours"] for r in ARM_RULES.values()) * 3600)}
+                  "max_close_ts": int(now + max(WATCH_HOURS, *(r["max_hours"] for r in ARM_RULES.values())) * 3600)}
         if cursor:
             params["cursor"] = cursor
         resp = await client._make_authenticated_request("GET", "/trade-api/v2/markets", params=params,
@@ -269,8 +336,11 @@ async def _book_info(client, ticker: str, side: str, price: float) -> Tuple[Opti
 
 
 async def scan_favorites(client, now: float, path: Optional[str] = None, logger=None,
-                         markets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                         markets: Optional[List[Dict[str, Any]]] = None,
+                         prices: Optional[PriceMemory] = None) -> Dict[str, Any]:
     markets = markets if markets is not None else await fetch_window(client, now)
+    prices = prices or PRICES
+    prices.update(markets, now)
     known = {arm: _known(path, arm) for arm in ARM_RULES}
     per_event = {arm: _event_counts(path, arm) for arm, r in ARM_RULES.items() if r.get("max_per_event")}
     qualifying = new = 0
@@ -295,6 +365,8 @@ async def scan_favorites(client, now: float, path: Optional[str] = None, logger=
             if m["ticker"] in known[arm]:
                 continue
             if arm in per_event and per_event[arm].get(m.get("event_ticker"), 0) >= rules["max_per_event"]:
+                continue
+            if filtered_out(rules, m, fav, now, prices):
                 continue
             key = (m["ticker"], fav["side"], fav["price"])
             if key not in depth_cache:
@@ -729,4 +801,27 @@ def report(path: Optional[str] = None) -> Dict[str, Any]:
         out["splits"][arm] = sp
         out.setdefault("bankroll", {})[arm] = {b: simulate_bankroll(g, b) for b in BANKROLLS}
         out.setdefault("stress", {})[arm] = stress(g)
+    out["vs_base"] = {}
+    for arm, base in ARM_BASE.items():
+        a_start = out["arm_started"].get(arm)
+        if df.empty or not a_start:
+            continue
+        b = df[(df["arm"] == base) & (df["entered_ts"] >= a_start)]
+        out["vs_base"][arm] = {"base": base, **{k: v for k, v in (_stats(b) if not b.empty else {}).items()
+                                                if k in ("settled", "events", "c_per_contract", "margin", "win_rate")}}
+    out["calendar_lookback"] = calendar_lookback(df)
     return out
+
+
+def calendar_lookback(df: pd.DataFrame) -> Dict[str, Any]:
+    """HINDSIGHT ONLY (not a verdict): how 'All favorites' bets did when a big scheduled event happened
+    while they were open, vs. the rest -- over the whole test, including the days that gave us the idea."""
+    from src.event_calendar import event_during
+    if df.empty:
+        return {}
+    g = df[df["arm"] == "favorites"]
+    if g.empty:
+        return {}
+    exposed = [event_during(e, c) is not None for e, c in zip(g["entered_ts"], g["close_ts"])]
+    g = g.assign(exposed=exposed)
+    return {k: _stats(g[g["exposed"] == v]) for k, v in (("during big events", True), ("other times", False))}

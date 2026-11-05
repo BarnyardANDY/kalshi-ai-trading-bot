@@ -583,6 +583,12 @@ with tab_fav:
                 d.metric("¢ / contract", f"{sa['c_per_contract']:+.2f}¢",
                          f"± {sa['margin']:.2f}¢" if sa.get("margin") is not None else None, delta_color="off")
                 e.metric("Losses", f"{sa['losses']:,}", f"P&L at 10/bet: {money(sa['pnl_10'])}", delta_color="off")
+            vb = (fr.get("vs_base") or {}).get(arm) or {}
+            if vb.get("c_per_contract") is not None and sa.get("c_per_contract") is not None:
+                st.caption(f"Same days, without this arm's extra rule ({F.ARMS[vb['base']]}): "
+                           f"{vb['c_per_contract']:+.2f}¢ ± {vb.get('margin') or 0:.2f}¢ on {vb.get('events', 0):,} events, "
+                           f"vs {sa['c_per_contract']:+.2f}¢ here. The extra rule earns its keep only if this arm "
+                           "stays clearly ahead.")
             if sa["verdict"].startswith("PASSED"):
                 st.success(f"Verdict: {sa['verdict']}")
             elif sa["verdict"].startswith("losing"):
@@ -597,6 +603,15 @@ with tab_fav:
             for arm in F.ARMS:
                 if arm not in F.MAIN_ARMS:
                     _arm_card(arm, F.ARMS[arm])
+        lb = fr.get("calendar_lookback") or {}
+        if lb.get("during big events", {}).get("settled"):
+            with st.expander("Looking back (hindsight, NOT a verdict): All favorites during big scheduled events vs. other times"):
+                st.caption("Includes the very days that gave us the idea (election week), so it is bound to flatter the "
+                           "calendar rule. Only the 'sitting out big scheduled events' arm, on fresh bets, counts.")
+                st.dataframe(pd.DataFrame([{"when": k, "settled": v.get("settled"), "events": v.get("events"),
+                                            "win rate": v.get("win_rate"), "¢ / contract": v.get("c_per_contract"),
+                                            "± (¢)": v.get("margin")} for k, v in lb.items()]),
+                             hide_index=True, use_container_width=True)
         st.caption("Win rate vs. break-even is the whole story here: at ~95c you win ~5c most of the time and lose "
                    "~95c when the favorite fails, so one loss erases ~19 wins. Wait for the event count before "
                    "trusting any number.")
@@ -605,7 +620,7 @@ with tab_fav:
         if not done.empty:
             st.markdown("#### Equity (per contract, settled bets)")
             fig = go.Figure()
-            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6")):
+            for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6"), ("fav_cal", "#1abc9c"), ("fav_steady", "#e67e22")):
                 g = done[done["arm"] == arm]
                 if not g.empty:
                     fig.add_trace(go.Scatter(x=g["settled_et"], y=g["c"].cumsum() / 100, mode="lines", name=F.ARMS[arm],
@@ -638,7 +653,7 @@ with tab_fav:
                 pick_b = st.radio("Show value over time for", list(F.BANKROLLS), horizontal=True,
                                   format_func=lambda b: f"${b:,}", key="fav_bankroll")
                 fig = go.Figure()
-                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6")):
+                for arm, color in (("favorites", ACCENT), ("whale", "#2ecc71"), ("fav_93_95", "#f39c12"), ("fav_1_6h", "#3498db"), ("fav_econ", "#e74c3c"), ("fav_econ_2", "#9b59b6"), ("fav_cal", "#1abc9c"), ("fav_steady", "#e67e22")):
                     cv = (bk.get(arm) or {}).get(pick_b, {}).get("curve") or []
                     if cv:
                         xs = pd.to_datetime([t for t, _ in cv], unit="s", utc=True).tz_convert("America/New_York").tz_localize(None)
