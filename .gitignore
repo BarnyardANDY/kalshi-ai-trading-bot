@@ -244,3 +244,7 @@ data/poly_report.json
 data/live_econ.db
 data/live_arm.json
 data/live_econ.lock
+
+data/sharp_check.db
+data/sharp_report.json
+data/sharp_key.json

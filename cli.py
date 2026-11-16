@@ -1741,6 +1741,71 @@ def cmd_poly_check(args: argparse.Namespace) -> None:
         print("\nPolymarket check stopped.")
 
 
+def cmd_sharp_check(args: argparse.Namespace) -> None:
+    """Sharp-sportsbook check (measurement only, never trades). See src/sharp_check.py."""
+    from src import sharp_check as SC
+
+    if args.set_key:
+        import getpass
+        provider = input("Provider (odds_api or pinnapi): ").strip()
+        key = getpass.getpass("Paste the API key (nothing will show): ")
+        SC.save_key(provider, key)
+        print(f"Saved ({provider}) to {SC.KEY_PATH}, readable only by this server account.")
+        return
+    if args.probe:
+        print("Reading each league's sportsbook prices once and matching them to Kalshi (read-only, nothing stored)...")
+        out = asyncio.run(SC.probe())
+        if "error" in out:
+            print("  " + out["error"])
+            return
+        print(f"  provider: {out['provider']}")
+        for lg, st in out.items():
+            if lg == "provider":
+                continue
+            if "error" in st:
+                print(f"  {lg.upper()}: ERROR {st['error']}")
+                continue
+            print(f"  {lg.upper()}: sportsbook games {st['sharp_games']}, Kalshi events {st['kalshi_events']}, "
+                  f"matched {st['matched']}")
+            for ex in st["examples"]:
+                print(f"      e.g. {ex}")
+            for ex in st["unmatched"]:
+                print(f"      unmatched: {ex}")
+            for ex in st["kalshi_sample"]:
+                print(f"      Kalshi looks like: {ex}")
+            if st.get("raw_keys"):
+                print(f"      feed fields: {st['raw_keys']}")
+        return
+    if args.report:
+        rep = SC.write_report()
+        print("=" * 70)
+        print("  SHARP-SPORTSBOOK CHECK (no trading)")
+        print("=" * 70)
+        print(f"  {rep.get('views', 0):,} price comparisons, {rep.get('games', 0)} games, {rep.get('markets', 0)} markets")
+        for t in rep.get("thresholds", []):
+            c = t.get("c_per_contract")
+            print(f"    gap >= {t['threshold'] * 100:.0f}c: {t['bets']} paper bets ({t['per_day']:.1f}/day), "
+                  + (f"{c * 100:+.2f}c/contract on {t['events']} events, " if c is not None else "")
+                  + t["verdict"])
+        return
+
+    import logging
+    Path("logs").mkdir(exist_ok=True)
+    logger = logging.getLogger("sharp_check")
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+        for h in (logging.FileHandler("logs/sharp_check.log"), logging.StreamHandler(sys.stdout)):
+            h.setFormatter(fmt)
+            logger.addHandler(h)
+    logger.propagate = False
+    print("Sharp-sportsbook check running (measurement only: it never places orders). Ctrl+C to stop.")
+    try:
+        asyncio.run(SC.run_forever(logger))
+    except KeyboardInterrupt:
+        print("\nSharp-sportsbook check stopped.")
+
+
 def cmd_favorites(args: argparse.Namespace) -> None:
     """Favorites paper test (measurement only, never trades). See src/favorites.py."""
     from src import favorites as F
@@ -2460,6 +2525,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_pc.add_argument("--report", action="store_true", help="Print results so far and exit")
     p_pc.add_argument("--probe", action="store_true", help="Check matching on both sites once and exit")
     p_pc.set_defaults(func=cmd_poly_check)
+
+    p_sc = subparsers.add_parser(
+        "sharp-check", help="Study: does Kalshi sell teams cheaper than Pinnacle's fair price after fees? (never trades)")
+    p_sc.add_argument("--set-key", action="store_true", help="Save your odds-feed API key (prompted, never echoed)")
+    p_sc.add_argument("--probe", action="store_true", help="Read the feed once and test matching to Kalshi")
+    p_sc.add_argument("--report", action="store_true", help="Print the current results")
+    p_sc.set_defaults(func=cmd_sharp_check)
 
     # --- arb-scan ---
     p_arb = subparsers.add_parser(

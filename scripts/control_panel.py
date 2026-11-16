@@ -144,7 +144,8 @@ cap = cfg["DAILY_AI_COST_LIMIT"]
 s4.metric("AI spend today", f"\\${ai['cost']:.2f} of \\${cap:.2f}", f"{ai['requests']} requests", delta_color="off")
 
 # Live tests first; finished ones live in the Archive tab (their numbers stay, frozen).
-tab_live, tab_fav, tab_ctrl, tab_arch = st.tabs(["Live test", "Favorites test", "Strategy controls", "Archive"])
+tab_sharp, tab_live, tab_fav, tab_ctrl, tab_arch = st.tabs(
+    ["Sharp-book test", "Live test", "Favorites test", "Strategy controls", "Archive"])
 with tab_arch:
     st.caption("Finished tests, kept for the record. None of these found an edge you could trade; their "
                "processes are stopped and their numbers are frozen at the end.")
@@ -486,6 +487,56 @@ with tab_maker:
 @st.cache_data(ttl=30, max_entries=1)
 def _live():
     return LE.report()
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def _sharp():
+    from src import sharp_check as SC
+    return SC.report()
+
+
+with tab_sharp:
+    st.caption("Paper only, measurement only: it never places an order. Pinnacle is the sharpest sportsbook, so its "
+               "margin-free price is the best public guess at a game's true chance. This checks whether Kalshi's REAL "
+               "order book (price and contracts for sale) ever sells a team cheaper than that, by more than Kalshi's "
+               "fee. Same pre-set rule as every test: 14 days and 300 separate events. Runs as tmux session 'sharp'.")
+    try:
+        sr = _sharp()
+    except Exception as e:  # database not created yet
+        sr = {"views": 0, "error": repr(e)}
+    if not sr.get("views"):
+        st.info("No data yet. On the server: `python cli.py sharp-check --set-key`, then run it in tmux session 'sharp'."
+                + (f" Recent log: {sr['log'][0]['msg']}" if sr.get("log") else ""))
+        for r in sr.get("log", [])[:5]:
+            st.text(f"{datetime.fromtimestamp(r['ts']).strftime('%m-%d %H:%M')}  {r['level']}  {r['msg']}")
+    else:
+        st.markdown(f"**Day {sr['days']:.1f} of 14** - {sr['views']:,} price comparisons on "
+                    f"{sr['games']} games ({sr['provider']}). A paper bet is the first moment a market's real ask is "
+                    "below Pinnacle's fair price by at least the gap shown, after fees, with 3+ contracts for sale.")
+        rows = []
+        for t in sr["thresholds"]:
+            c, m = t.get("c_per_contract"), t.get("margin")
+            rows.append({"gap at least": f"{t['threshold'] * 100:.0f}c", "paper bets": t["bets"],
+                         "per day": round(t["per_day"], 1), "settled events": t["events"],
+                         "win rate": t.get("win_rate"), "avg price": t.get("avg_price"), "avg fair": t.get("avg_fair"),
+                         "¢ / contract": None if c is None else round(c * 100, 2),
+                         "± (¢)": None if m is None else round(m * 100, 2),
+                         "$/day at 3 contracts": None if t.get("dollars_per_day") is None else round(t["dollars_per_day"], 2),
+                         "verdict": t["verdict"]})
+        st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+        cal = sr.get("calibration")
+        if cal:
+            a, b, c3 = st.columns(3)
+            a.metric("Pinnacle Brier (lower is better)", f"{cal['Pinnacle Brier']:.4f}")
+            b.metric("Kalshi ask Brier", f"{cal['Kalshi Brier']:.4f}")
+            c3.metric("Kalshi ask minus Pinnacle fair", f"{cal['avg Kalshi ask minus Pinnacle fair (c)']:+.2f}¢",
+                      f"{cal['events']} events", delta_color="off")
+        gs = sr.get("gap_sizes", {})
+        if gs:
+            st.caption("How real are the gaps? " + " · ".join(f"{k}: {v:,}" for k, v in gs.items()))
+        with st.expander("Recent log"):
+            for r in sr.get("log", []):
+                st.text(f"{datetime.fromtimestamp(r['ts']).strftime('%m-%d %H:%M')}  {r['level']}  {r['msg']}")
 
 
 with tab_live:
