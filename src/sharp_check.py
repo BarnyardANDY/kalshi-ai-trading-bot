@@ -220,6 +220,14 @@ def count_request(path, provider: str, now: float) -> None:
         c.commit()
 
 
+def safe_err(e: BaseException, key: Optional[str] = None) -> str:
+    """Error text with the API key (and any apiKey=... in a URL) hidden, so it never reaches a log or the screen."""
+    msg = repr(e)
+    if key:
+        msg = msg.replace(key, "***")
+    return re.sub(r"(?i)(api_?key=)[^&'\s]+", r"\1***", msg)[:300]
+
+
 def load_key(path: Optional[str] = None) -> Optional[Dict[str, str]]:
     try:
         with open(path or KEY_PATH) as f:
@@ -372,14 +380,14 @@ async def run_forever(logger=None, path: Optional[str] = None) -> None:
                         if s["games"]:
                             done.append(f"{lg}: {s['matched']}/{s['games']} games matched, {s['gaps']} gaps")
                     except Exception as e:
-                        note(path, "warn", f"{lg} read failed: {e!r}"[:300], logger)
+                        note(path, "warn", f"{lg} read failed: {safe_err(e, key)}", logger)
                 note(path, "info", "round: " + ("; ".join(done) if done else "no games in the next day"), logger)
                 if time.time() - last_settle > 600:
                     last_settle = time.time()
                     try:
                         await settle(client, last_settle, path, logger)
                     except Exception as e:
-                        note(path, "warn", f"settle failed: {e!r}"[:200], logger)
+                        note(path, "warn", f"settle failed: {safe_err(e, key)}", logger)
                 await asyncio.sleep(max(60.0, next_wait(provider, used) - (time.time() - t0)))
     finally:
         await client.close()
@@ -415,7 +423,7 @@ async def probe(logger=None, path: Optional[str] = None) -> Dict[str, Any]:
                                                  for e in k_events[:2]],
                                "raw_keys": sorted(first_raw.keys())[:20] if isinstance(first_raw, dict) else None}
                 except Exception as e:
-                    out[lg] = {"error": repr(e)[:300]}
+                    out[lg] = {"error": safe_err(e, cfg["key"])}
     finally:
         await client.close()
     return out

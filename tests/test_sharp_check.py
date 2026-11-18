@@ -177,3 +177,11 @@ def test_key_file_is_private_and_rejects_unknown_providers(tmp_path):
 def test_never_places_orders():
     src = open(S.__file__).read()
     assert "place_order" not in src and "create_order" not in src
+
+
+def test_errors_never_show_the_api_key():
+    key = "abc123SECRETkey"
+    e = RuntimeError(f"Client error '401' for url 'https://api.x.com/v4/odds?regions=eu&apiKey={key}&b=1'")
+    msg = S.safe_err(e, key)
+    assert key not in msg and "apiKey=***" in msg
+    assert key not in S.safe_err(RuntimeError(f"boom {key}"), key)
